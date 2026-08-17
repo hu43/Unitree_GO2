@@ -1,0 +1,15 @@
+# Build artifacts
+build/
+install/
+log/
+
+# Python
+__pycache__/
+*.pyc
+
+# Editor
+.vscode/
+.idea/
+
+# Recorded keypoints (local data)
+keypoints*.yaml

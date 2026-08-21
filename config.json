@@ -1,0 +1,49 @@
+{
+  "host": "0.0.0.0",
+  "port": 8080,
+  "topics": {
+    "map": "/grid_map/occupancy",
+    "odom": "/utlidar/robot_odom",
+    "goal": "/move_base_simple/goal",
+    "cmd_vel": "/cmd_vel",
+    "sport_request": "/api/sport/request"
+  },
+  "map_downsample": 4000,
+  "push_hz": 10,
+  "reach_threshold": 0.4,
+  "max_speed": 0.5,
+  "waypoints": [
+    {
+      "id": 1,
+      "name": "展品1",
+      "x": 1.725,
+      "y": 3.466,
+      "z": 0.316,
+      "yaw": 2.405
+    },
+    {
+      "id": 2,
+      "name": "展品2",
+      "x": 0.498,
+      "y": 4.549,
+      "z": 0.312,
+      "yaw": -2.523
+    },
+    {
+      "id": 3,
+      "name": "展品3",
+      "x": -3.067,
+      "y": 2.161,
+      "z": 0.313,
+      "yaw": -2.52
+    },
+    {
+      "id": 4,
+      "name": "展品4",
+      "x": -1.295,
+      "y": 0.005,
+      "z": 0.313,
+      "yaw": -0.728
+    }
+  ]
+}

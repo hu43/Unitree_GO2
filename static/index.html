@@ -1,0 +1,99 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Go2 机器狗主面板</title>
+<link rel="stylesheet" href="style.css">
+<style>
+  /* main panel layout */
+  body { overflow: auto; }
+  #home {
+    max-width: 560px; margin: 0 auto; padding: 24px 16px 40px;
+    display: flex; flex-direction: column; align-items: center; gap: 20px;
+    min-height: 100vh;
+  }
+  .logo {
+    font-size: 72px; line-height: 1; margin-top: 16px;
+    filter: drop-shadow(0 8px 24px rgba(74,158,255,.35));
+  }
+  .home-title { text-align: center; }
+  .home-title h1 { font-size: 26px; font-weight: 700; }
+  .home-title p { color: var(--muted); font-size: 14px; margin-top: 6px; }
+  .status-card {
+    width: 100%; background: var(--card); border: 1px solid #2a3550;
+    border-radius: 12px; padding: 14px 16px; font-size: 14px; line-height: 1.9;
+  }
+  .status-card .row { display: flex; justify-content: space-between; }
+  .status-card b { color: var(--ok); }
+  .status-card .bad { color: var(--danger); }
+  .big-btn {
+    width: 100%; padding: 20px; border-radius: 14px; border: none;
+    background: linear-gradient(135deg, var(--accent), #2f7ad0);
+    color: #fff; font-size: 20px; font-weight: 700; cursor: pointer;
+    box-shadow: 0 6px 24px rgba(74,158,255,.35);
+  }
+  .big-btn:active { transform: scale(.98); }
+  .sec-title { width: 100%; color: var(--accent); font-size: 15px; font-weight: 600; text-align: left; margin-top: 4px; }
+  .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; width: 100%; }
+  .grid-2 a {
+    display: block; text-align: center; padding: 14px 8px; border-radius: 10px;
+    background: var(--card2); border: 1px solid #33415e; color: var(--fg);
+    text-decoration: none; font-size: 14px;
+  }
+  .footer { color: var(--muted); font-size: 12px; margin-top: 8px; }
+</style>
+</head>
+<body>
+<div id="home">
+  <div class="logo">🐕</div>
+  <div class="home-title">
+    <h1>Go2 机器狗主面板</h1>
+    <p>Unitree Go2 · 展厅导览系统</p>
+  </div>
+
+  <div class="status-card">
+    <div class="row"><span>系统连接</span><b id="hm-conn">检测中…</b></div>
+    <div class="row"><span>机器人位置</span><b id="hm-pos">-</b></div>
+    <div class="row"><span>朝向</span><b id="hm-yaw">-</b></div>
+    <div class="row"><span>地图点</span><b id="hm-map">0</b></div>
+  </div>
+
+  <button class="big-btn" onclick="location.href='/console'">🚶 进入展厅导览控制台</button>
+
+  <div class="sec-title">功能入口</div>
+  <div class="grid-2">
+    <a href="/console">🎛️ 导览控制台</a>
+    <a href="/console">🗺️ 地图与导航</a>
+    <a href="/console">🕹️ 运动控制</a>
+    <a href="/console">🗣️ 语音编排</a>
+  </div>
+
+  <div class="footer">SCAN-Planner · Go2 X · ROS2 Humble</div>
+</div>
+
+<script>
+// main panel: show robot status via WebSocket (read-only dashboard)
+const $ = (id) => document.getElementById(id);
+function connect() {
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  const ws = new WebSocket(`${proto}://${location.host}/ws`);
+  ws.onopen = () => { $("hm-conn").textContent = "● 已连接"; $("hm-conn").className = ""; };
+  ws.onclose = () => {
+    $("hm-conn").textContent = "● 未连接"; $("hm-conn").className = "bad";
+    setTimeout(connect, 2000);
+  };
+  ws.onerror = () => ws.close();
+  ws.onmessage = (ev) => {
+    let m; try { m = JSON.parse(ev.data); } catch { return; }
+    if (m.type === "state") {
+      $("hm-pos").textContent = `${m.pos[0].toFixed(2)}, ${m.pos[1].toFixed(2)}`;
+      $("hm-yaw").textContent = `${(m.yaw * 180 / Math.PI).toFixed(1)}°`;
+      $("hm-map").textContent = m.map.length;
+    }
+  };
+}
+connect();
+</script>
+</body>
+</html>

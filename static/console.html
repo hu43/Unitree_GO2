@@ -1,0 +1,104 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Go2 展厅导览控制台</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<div id="app">
+  <header>
+    <h1>🐕 Go2 展厅导览控制台</h1>
+    <div class="header-right">
+      <div class="conn" id="conn">● 未连接</div>
+      <button id="btn-home" class="home-btn" onclick="location.href='/'">🏠 返回主面板</button>
+    </div>
+  </header>
+
+  <main>
+    <!-- 地图区 -->
+    <section id="map-panel">
+      <div class="map-tools">
+        <button id="btn-goal" class="tool active" data-mode="goal">🎯 设目标</button>
+        <button id="btn-addpoint" class="tool" data-mode="addpoint">📍 加路径点</button>
+        <button id="btn-recenter" class="tool">⭕ 居中</button>
+        <span class="hint" id="map-hint">点击地图设置目标/路径点；拖拽平移，滚轮缩放</span>
+      </div>
+      <canvas id="map"></canvas>
+    </section>
+
+    <!-- 控制面板 -->
+    <aside id="side">
+      <!-- 运动控制 -->
+      <section class="card">
+        <h2>🕹️ 运动控制</h2>
+        <div class="control-row">
+          <div id="joystick"><div class="stick" id="stick-knob"></div></div>
+          <div class="btn-grid">
+            <button class="act" data-act="standup">🟢 站立</button>
+            <button class="act unlock" data-act="recovery">🔓 解除锁定 START</button>
+            <button class="act" data-act="standdown">🛌 卧倒</button>
+            <button class="act danger" data-act="stop">⛔ 急停</button>
+          </div>
+        </div>
+        <div class="slider-row">
+          <span>速度 <b id="speed-val">0.50</b></span>
+          <input type="range" id="speed-slider" min="0.1" max="1.0" step="0.05" value="0.5">
+        </div>
+      </section>
+
+      <!-- 展品点位 -->
+      <section class="card">
+        <h2>📍 展品点位 <span class="hint">（点开可编辑介绍语音）</span></h2>
+        <div class="wp-actions">
+          <button id="btn-record">📸 记录当前点</button>
+          <button id="btn-save">💾 保存</button>
+        </div>
+        <ul id="wp-list"></ul>
+        <p class="hint">摇杆开到展品前点"记录"，或地图上选"加路径点"模式点击</p>
+      </section>
+
+      <!-- 导览 -->
+      <section class="card">
+        <h2>🚶 导览模式</h2>
+        <div class="tour-row">
+          <button id="btn-tour-start">▶ 开始导览</button>
+          <button id="btn-tour-stop" class="danger">⏹ 停止</button>
+        </div>
+        <p class="hint">勾选展品（下方列表），按顺序导览；机器人沿路径点自主避障行走，到达展品自动语音介绍，介绍完才进入下一个</p>
+        <div id="tour-status" class="tour-status">未开始</div>
+        <div class="tour-row" id="intro-row" style="display:none">
+          <button id="btn-skip-intro">⏭ 跳过介绍</button>
+        </div>
+      </section>
+
+      <!-- 系统控制 -->
+      <section class="card">
+        <h2>⚙️ SCAN-Planner 系统</h2>
+        <div class="tour-row">
+          <button id="btn-scan-start">🚀 启动 SCAN-Planner</button>
+          <button id="btn-scan-stop" class="danger">⏹ 停止</button>
+        </div>
+        <p class="hint">启动 = 运行真实机器人导航栈（navi_mode=1, bridge 开启，机器人会站立）；日志在 web/log/scan_planner.log</p>
+        <div id="scan-status" class="tour-status">SCAN-Planner: 未知</div>
+      </section>
+
+      <!-- 状态 -->
+      <section class="card">
+        <h2>📊 状态</h2>
+        <div id="status">
+          <div>控制: <b id="st-mode">摇杆</b></div>
+          <div>位置: <b id="st-pos">-</b></div>
+          <div>朝向: <b id="st-yaw">-</b></div>
+          <div>导览: <b id="st-tour">-</b></div>
+          <div>地图点: <b id="st-map">0</b></div>
+        </div>
+      </section>
+    </aside>
+  </main>
+</div>
+
+<script src="app.js"></script>
+</body>
+</html>

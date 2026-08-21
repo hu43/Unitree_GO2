@@ -1,0 +1,12 @@
+# Python venv / cache
+venv/
+__pycache__/
+*.pyc
+
+# Runtime logs & generated audio
+log/
+audio/
+
+# Editor
+.vscode/
+.idea/

@@ -1,0 +1,149 @@
+* { box-sizing: border-box; margin: 0; padding: 0; }
+
+:root {
+  --bg: #0f1420;
+  --card: #1a2233;
+  --card2: #232d42;
+  --fg: #e8ecf4;
+  --muted: #8b95a8;
+  --accent: #4a9eff;
+  --ok: #34d399;
+  --warn: #fbbf24;
+  --danger: #f87171;
+}
+
+html, body { height: 100%; }
+body {
+  background: var(--bg);
+  color: var(--fg);
+  font-family: system-ui, -apple-system, "PingFang SC", "Microsoft YaHei", sans-serif;
+  overflow: hidden;
+}
+
+#app { display: flex; flex-direction: column; height: 100%; }
+
+header { display: flex; align-items: center; justify-content: space-between;
+  padding: 8px 14px; background: var(--card); border-bottom: 1px solid #2a3550; }
+.header-right { display: flex; align-items: center; gap: 10px; }
+.home-btn {
+  padding: 6px 12px; border-radius: 6px; border: 1px solid #33415e;
+  background: var(--card2); color: var(--fg); cursor: pointer; font-size: 13px;
+  white-space: nowrap;
+}
+.home-btn:active { transform: scale(.96); }
+header h1 { font-size: 17px; font-weight: 600; }
+.conn { font-size: 13px; color: var(--warn); }
+.conn.ok { color: var(--ok); }
+.conn.bad { color: var(--danger); }
+
+main { flex: 1; display: flex; min-height: 0; }
+
+/* ---- map ---- */
+#map-panel { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+.map-tools {
+  display: flex; align-items: center; gap: 8px; padding: 8px 10px;
+  background: var(--card); border-bottom: 1px solid #2a3550; flex-wrap: wrap;
+}
+.tool {
+  padding: 6px 12px; border-radius: 6px; border: 1px solid #33415e;
+  background: var(--card2); color: var(--fg); cursor: pointer; font-size: 13px;
+}
+.tool.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+.hint { font-size: 12px; color: var(--muted); }
+
+#map { flex: 1; width: 100%; background: #0b0f18; touch-action: none; cursor: crosshair; }
+
+/* ---- side panel ---- */
+#side {
+  width: 340px; background: var(--card); border-left: 1px solid #2a3550;
+  display: flex; flex-direction: column; overflow-y: auto;
+}
+.card { padding: 10px 12px; border-bottom: 1px solid #2a3550; }
+.card h2 { font-size: 14px; margin-bottom: 8px; color: var(--accent); }
+
+.control-row { display: flex; gap: 12px; align-items: center; }
+
+#joystick {
+  width: 120px; height: 120px; border-radius: 50%;
+  background: radial-gradient(circle, #1e2940 0%, #141c30 100%);
+  border: 2px solid #33415e; position: relative; flex-shrink: 0;
+  touch-action: none;
+}
+#joystick::before {
+  content: ""; position: absolute; left: 50%; top: 50%;
+  width: 1px; height: 100%; background: #2a3550; transform: translateX(-50%);
+}
+#joystick::after {
+  content: ""; position: absolute; top: 50%; left: 0; right: 0;
+  height: 1px; background: #2a3550; transform: translateY(-50%);
+}
+.stick {
+  position: absolute; left: 50%; top: 50%;
+  width: 44px; height: 44px; border-radius: 50%;
+  background: var(--accent); border: 2px solid #7cb8ff;
+  transform: translate(-50%, -50%);
+  box-shadow: 0 0 12px rgba(74,158,255,.5);
+}
+#joystick.disabled { opacity: .35; border-color: #555f75; cursor: not-allowed; }
+#joystick.disabled::after {
+  content: "导览中\n摇杆禁用"; position: absolute; inset: 0;
+  display: flex; align-items: center; justify-content: center;
+  color: var(--warn); font-size: 11px; text-align: center;
+  line-height: 1.6; white-space: pre; pointer-events: none;
+}
+
+.btn-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; flex: 1; }
+.act {
+  padding: 12px 6px; border-radius: 8px; border: 1px solid #33415e;
+  background: var(--card2); color: var(--fg); font-size: 13px; cursor: pointer;
+}
+.act:active { transform: scale(.96); background: #2c3a5c; }
+.act.danger { background: #3a2020; border-color: #7a3030; color: var(--danger); }
+.act.unlock { background: #203a20; border-color: #2f7a30; color: var(--ok); }
+
+.slider-row { display: flex; align-items: center; gap: 10px; margin-top: 10px; font-size: 13px; }
+.slider-row input { flex: 1; }
+
+.wp-actions { display: flex; gap: 8px; margin-bottom: 8px; }
+.wp-actions button {
+  flex: 1; padding: 8px; border-radius: 6px; border: 1px solid #33415e;
+  background: var(--card2); color: var(--fg); cursor: pointer; font-size: 13px;
+}
+
+#wp-list { list-style: none; max-height: 180px; overflow-y: auto; }
+#wp-list li { display: flex; align-items: center; gap: 8px; padding: 6px 4px;
+  border-bottom: 1px solid #232d42; font-size: 13px; }
+#wp-list li.wp-item { flex-wrap: wrap; }
+.wp-intro { display: flex; gap: 6px; width: 100%; margin-top: 4px; }
+.wp-intro .intro-input {
+  flex: 1; min-width: 0; padding: 5px 8px; border-radius: 5px;
+  border: 1px solid #33415e; background: #121a2c; color: var(--fg); font-size: 12px;
+}
+.wp-intro .preview {
+  padding: 5px 8px; border-radius: 5px; border: 1px solid #33415e;
+  background: var(--card2); color: var(--fg); cursor: pointer; font-size: 12px; white-space: nowrap;
+}
+.tour-row .skip { background: #3a3020; border-color: #7a6030; color: var(--warn); }
+#wp-list li input[type=checkbox] { width: 16px; height: 16px; accent-color: var(--accent); }
+#wp-list li .wpid { color: var(--muted); font-size: 12px; width: 24px; }
+#wp-list li .wpname { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#wp-list li .wpcoord { color: var(--muted); font-size: 11px; }
+#wp-list li .del { color: var(--danger); cursor: pointer; border: none; background: none; font-size: 15px; }
+
+.tour-row { display: flex; gap: 8px; }
+.tour-row button {
+  flex: 1; padding: 10px; border-radius: 8px; border: 1px solid #33415e;
+  background: var(--card2); color: var(--fg); cursor: pointer; font-size: 14px;
+}
+.tour-row .danger { background: #3a2020; border-color: #7a3030; color: var(--danger); }
+.tour-status { margin-top: 8px; padding: 8px; border-radius: 6px; background: #121a2c; font-size: 13px; }
+
+#status { font-size: 13px; line-height: 1.7; }
+#status b { color: var(--ok); font-weight: 600; }
+
+/* ---- mobile ---- */
+@media (max-width: 900px) {
+  main { flex-direction: column; }
+  #map-panel { flex: 1 1 55%; }
+  #side { width: 100%; flex: 0 0 auto; border-left: none; border-top: 1px solid #2a3550; max-height: 50%; }
+}

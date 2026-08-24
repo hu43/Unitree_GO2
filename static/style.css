@@ -38,14 +38,14 @@ header h1 { font-size: 17px; font-weight: 600; }
 
 main { flex: 1; display: flex; min-height: 0; }
 
-/* ---- map ---- */
-#map-panel { flex: 1; display: flex; flex-direction: column; min-width: 0; }
+/* ---- map (compact, reference only) ---- */
+#map-panel { flex: 0 0 42%; display: flex; flex-direction: column; min-width: 0; }
 .map-tools {
-  display: flex; align-items: center; gap: 8px; padding: 8px 10px;
+  display: flex; align-items: center; gap: 8px; padding: 6px 10px;
   background: var(--card); border-bottom: 1px solid #2a3550; flex-wrap: wrap;
 }
 .tool {
-  padding: 6px 12px; border-radius: 6px; border: 1px solid #33415e;
+  padding: 6px 10px; border-radius: 6px; border: 1px solid #33415e;
   background: var(--card2); color: var(--fg); cursor: pointer; font-size: 13px;
 }
 .tool.active { background: var(--accent); border-color: var(--accent); color: #fff; }
@@ -53,10 +53,10 @@ main { flex: 1; display: flex; min-height: 0; }
 
 #map { flex: 1; width: 100%; background: #0b0f18; touch-action: none; cursor: crosshair; }
 
-/* ---- side panel ---- */
+/* ---- side panel (primary control area) ---- */
 #side {
-  width: 340px; background: var(--card); border-left: 1px solid #2a3550;
-  display: flex; flex-direction: column; overflow-y: auto;
+  flex: 1; background: var(--card); border-left: 1px solid #2a3550;
+  display: flex; flex-direction: column; overflow-y: auto; min-width: 300px;
 }
 .card { padding: 10px 12px; border-bottom: 1px solid #2a3550; }
 .card h2 { font-size: 14px; margin-bottom: 8px; color: var(--accent); }
@@ -123,6 +123,15 @@ main { flex: 1; display: flex; min-height: 0; }
   padding: 5px 8px; border-radius: 5px; border: 1px solid #33415e;
   background: var(--card2); color: var(--fg); cursor: pointer; font-size: 12px; white-space: nowrap;
 }
+.wp-intro .mini { color: var(--muted); font-size: 11px; align-self: center; white-space: nowrap; }
+.wp-intro .yaw-input {
+  width: 64px; padding: 5px 6px; border-radius: 5px;
+  border: 1px solid #33415e; background: #121a2c; color: var(--fg); font-size: 12px;
+}
+.wp-intro .action-select {
+  flex: 1; min-width: 0; padding: 5px 6px; border-radius: 5px;
+  border: 1px solid #33415e; background: #121a2c; color: var(--fg); font-size: 12px;
+}
 .tour-row .skip { background: #3a3020; border-color: #7a6030; color: var(--warn); }
 #wp-list li input[type=checkbox] { width: 16px; height: 16px; accent-color: var(--accent); }
 #wp-list li .wpid { color: var(--muted); font-size: 12px; width: 24px; }
@@ -141,9 +150,13 @@ main { flex: 1; display: flex; min-height: 0; }
 #status { font-size: 13px; line-height: 1.7; }
 #status b { color: var(--ok); font-weight: 600; }
 
-/* ---- mobile ---- */
+/* ---- mobile: map small strip on top, buttons dominate ---- */
 @media (max-width: 900px) {
   main { flex-direction: column; }
-  #map-panel { flex: 1 1 55%; }
-  #side { width: 100%; flex: 0 0 auto; border-left: none; border-top: 1px solid #2a3550; max-height: 50%; }
+  #map-panel { flex: 0 0 32vh; }
+  #side { width: 100%; flex: 1 1 auto; border-left: none; border-top: 1px solid #2a3550; }
+  .btn-grid .act { padding: 16px 6px; font-size: 15px; }
+  #joystick { width: 140px; height: 140px; }
+  .card { padding: 12px; }
+  .card h2 { font-size: 16px; }
 }

@@ -18,6 +18,7 @@ from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPo
 from sensor_msgs.msg import PointCloud2, PointField
 from nav_msgs.msg import Odometry
 from geometry_msgs.msg import PoseStamped, Twist
+from std_msgs.msg import Bool
 from unitree_api.msg import Request
 
 # Sport API ids (mirror of ros2_sport_client.h)
@@ -32,7 +33,30 @@ SPORT_SIT = 1009
 SPORT_RISESIT = 1010
 SPORT_SWITCHJOYSTICK = 1027
 SPORT_HEART = 1036
+SPORT_HELLO = 1016
+SPORT_STRETCH = 1017
+SPORT_CONTENT = 1020
+SPORT_SCRAPE = 1029
+SPORT_DANCE1 = 1022
+SPORT_DANCE2 = 1023
+SPORT_POSE = 1028
 SPORT_FREEWALK = 2045
+
+# Exhibit actions: name -> (api_id, default duration seconds, label)
+# Per official Unitree sports_services docs:
+#   Hello=打招呼, Dance1=舞蹈段落1, Dance2=舞蹈段落2, Scrape=拜年作揖,
+#   Stretch=伸懒腰, Heart=比心, BalanceStand=平衡站
+# Go2 has no "handshake" action in the official docs, so it is not included.
+EXHIBIT_ACTIONS = {
+    "": (None, 0, "无动作"),
+    "hello": (SPORT_HELLO, 2.5, "👋 打招呼"),
+    "heart": (SPORT_HEART, 2.0, "❤️ 比心"),
+    "dance1": (SPORT_DANCE1, 4.0, "💃 舞蹈1"),
+    "dance2": (SPORT_DANCE2, 4.0, "🕺 舞蹈2"),
+    "stretch": (SPORT_STRETCH, 2.0, "🧘 伸懒腰"),
+    "scrape": (SPORT_SCRAPE, 2.5, "🙏 拜年作揖"),
+    "balance": (SPORT_BALANCESTAND, 3.0, "⚖️ 平衡站"),
+}
 
 RELIABLE_QOS = QoSProfile(
     reliability=ReliabilityPolicy.RELIABLE,
@@ -108,6 +132,9 @@ class RosBridge(Node):
             Twist, topics.get("cmd_vel", "/cmd_vel"), 10)
         self._sport_pub = self.create_publisher(
             Request, topics.get("sport_request", "/api/sport/request"), 10)
+        # Pause signal for the bridge (so it stops overriding exhibit actions)
+        self._pause_pub = self.create_publisher(
+            Bool, topics.get("motion_pause", "/go2/motion_pause"), 10)
 
         self.get_logger().info("ROS bridge ready")
 
@@ -190,6 +217,31 @@ class RosBridge(Node):
         req = Request()
         req.header.identity.api_id = SPORT_STOPMOVE
         self._sport_pub.publish(req)
+
+    def send_damp(self):
+        """Damp (api 1001): drop into damping mode immediately."""
+        req = Request()
+        req.header.identity.api_id = SPORT_DAMP
+        self._sport_pub.publish(req)
+        self.get_logger().warn("DAMP issued (emergency)")
+
+    def send_pause(self, pause: bool):
+        """Tell the bridge to pause (True) or resume (False) sending Move
+        commands, so exhibit actions/turns are not overridden."""
+        msg = Bool()
+        msg.data = bool(pause)
+        self._pause_pub.publish(msg)
+
+    def send_action(self, name):
+        """Send an exhibit action (heart/dance/...). Returns (api_id, duration)."""
+        api_id, duration, _ = EXHIBIT_ACTIONS.get(name, (None, 0, ""))
+        if api_id is None:
+            return None, 0.0
+        req = Request()
+        req.header.identity.api_id = api_id
+        self._sport_pub.publish(req)
+        self.get_logger().info(f"action: {name} (api {api_id})")
+        return api_id, duration
 
 
 def start_bridge(cfg):

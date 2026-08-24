@@ -65,12 +65,12 @@ def save_config(cfg):
 
 
 # --------------------------------------------------------------------------
-# Tour (waypoint-guided autonomous navigation + voice narration)
+# Tour (waypoint-guided autonomous navigation + turn + action + narration)
 # --------------------------------------------------------------------------
 class Tour:
-    """Guides the robot through waypoints. On reaching a waypoint, plays the
-    exhibit's voice introduction (text -> TTS -> ffplay) and only advances to
-    the next waypoint once the introduction has finished."""
+    """Guides the robot through waypoints. On reaching a waypoint, runs the
+    configured exhibit action AND the voice introduction in parallel, and only
+    then advances to the next waypoint."""
 
     def __init__(self, bridge, cfg):
         self.bridge = bridge
@@ -78,10 +78,14 @@ class Tour:
         self.active = False
         self.ids = []            # waypoint ids in order
         self.idx = -1
-        self.state = "idle"      # idle | traveling | introducing | done
+        self.state = "idle"      # idle | traveling | turning | acting | done
         self.intro_text = ""
         self.intro_wp = None
-        self._play_task = None
+        self._stage_task = None  # current async stage (turn / act+intro)
+        self._turn_task = None
+        self._yaw_tolerance = math.radians(4.0)
+        self._yaw_k = 1.0        # proportional turn gain
+        self._max_vyaw = 0.6     # max turn rate
 
     def start(self, ids):
         if not ids:
@@ -97,13 +101,16 @@ class Tour:
         self.active = False
         self.state = "idle"
         self.intro_text = ""
-        if self._play_task:
-            self._play_task.cancel()
-            self._play_task = None
+        for task in (self._stage_task, self._turn_task):
+            if task:
+                task.cancel()
+        self._stage_task = None
+        self._turn_task = None
         # Halt the robot so the joystick can take over cleanly, then publish a
         # goal at the current position so SCAN-Planner finishes any running
         # trajectory and returns to WAIT_TARGET (releasing /cmd_vel).
         try:
+            self.bridge.send_pause(False)
             self.bridge.send_stopmove()
             self.bridge.send_cmd_vel(0, 0, 0)
             pos = self.bridge.snapshot()["position"]
@@ -113,12 +120,12 @@ class Tour:
         return {"ok": True, "msg": "tour stopped"}
 
     def skip_intro(self):
-        """Skip the current introduction and advance to the next waypoint."""
-        if self.state == "introducing" and self._play_task:
-            self._play_task.cancel()
-            self._play_task = None
+        """Skip the current action+intro stage and advance to the next waypoint."""
+        if self.state in ("acting", "introducing") and self._stage_task:
+            self._stage_task.cancel()
+            self._stage_task = None
             self._advance()
-            return {"ok": True, "msg": "intro skipped"}
+            return {"ok": True, "msg": "stage skipped"}
         return {"ok": False, "error": "not introducing"}
 
     def _send_current(self):
@@ -136,8 +143,8 @@ class Tour:
         return None
 
     async def tick(self, pos):
-        """Advance when the robot reaches the current waypoint, then play the
-        introduction before moving on."""
+        """Advance when the robot reaches the current waypoint, then turn to the
+        configured facing angle, then run action + intro in parallel."""
         if not self.active or self.idx < 0 or self.idx >= len(self.ids):
             return
         if self.state == "traveling":
@@ -148,26 +155,117 @@ class Tour:
             dx = pos[0] - wp["x"]
             dy = pos[1] - wp["y"]
             if math.hypot(dx, dy) < self.cfg.get("reach_threshold", 0.4):
-                # reached the exhibit -> introduce it
-                self.state = "introducing"
                 self.intro_wp = wp
                 self.intro_text = wp.get("intro", "").strip() or tts.DEFAULT_INTRO
-                log.info("reached exhibit %s, introducing...", wp.get("name", wp["id"]))
-                self._play_task = asyncio.create_task(self._play_intro(wp))
+                log.info("reached exhibit %s", wp.get("name", wp["id"]))
+                if wp.get("yaw_at") is not None and float(wp.get("yaw_at", 0.0)) != 0.0:
+                    self.state = "turning"
+                    self._turn_task = asyncio.create_task(self._stage_turn(wp))
+                else:
+                    self.state = "acting"
+                    self._stage_task = asyncio.create_task(self._stage_act_intro(wp))
+
+    @staticmethod
+    def _wrap_pi(a):
+        return (a + math.pi) % (2 * math.pi) - math.pi
+
+    async def _turn_to(self, target_yaw, max_vyaw=0.5, timeout=10.0):
+        """Open-loop turn in place to target_yaw.
+
+        Uses the configured turn speed and the angle to compute how long to
+        command yaw rotation, instead of waiting for the LIO odometry yaw
+        feedback (which updates slowly during in-place turns and caused the
+        turn loop to time out without actually rotating).
+        """
+        self.bridge.send_pause(True)  # stop the bridge overriding the turn
+        try:
+            yaw0 = self.bridge.snapshot()["yaw"]
+            err = self._wrap_pi(target_yaw - yaw0)
+            if abs(err) < self._yaw_tolerance:
+                log.info("already facing target %.1f deg", math.degrees(target_yaw))
+                return
+            dur = min(abs(err) / max_vyaw, timeout)
+            vyaw = math.copysign(max_vyaw, err)
+            log.info("turning %.1f deg at %.2f rad/s for %.1fs",
+                     math.degrees(err), vyaw, dur)
+            t0 = time.time()
+            while time.time() - t0 < dur:
+                self.bridge.send_move(0.0, 0.0, vyaw)
+                await asyncio.sleep(0.05)
+        finally:
+            self.bridge.send_move(0.0, 0.0, 0.0)
+        log.info("turn finished (target %.1f deg)", math.degrees(target_yaw))
+
+    async def _stage_turn(self, wp):
+        try:
+            target = math.radians(float(wp.get("yaw_at", 0.0)))
+            await self._turn_to(target)
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            log.warning("turn error: %s", e)
+        if not self.active:
+            return
+        self._turn_task = None
+        self.state = "acting"
+        self._stage_task = asyncio.create_task(self._stage_act_intro(wp))
+
+    async def _stage_act_intro(self, wp):
+        """Run the exhibit action and the voice introduction in parallel; advance
+        only when both have finished."""
+        # Pause the bridge (stop its repeated Move commands) so the action is
+        # not overridden, and release SCAN-Planner's control by sending a goal
+        # at the current position so its closed-loop controller stops /cmd_vel.
+        try:
+            self.bridge.send_pause(True)
+            self.bridge.send_stopmove()
+            self.bridge.send_cmd_vel(0, 0, 0)
+            pos = self.bridge.snapshot()["position"]
+            self.bridge.send_goal(pos[0], pos[1], 0.0)
+            await asyncio.sleep(1.0)
+        except Exception:
+            pass
+        # then action + intro in parallel
+        try:
+            action_name = wp.get("action", "") or ""
+            _, action_dur = self.bridge.send_action(action_name)
+            # start intro playback concurrently
+            intro_task = asyncio.create_task(self._play_intro(wp))
+            tasks = [intro_task]
+            if action_dur > 0:
+                # wait for both: action duration and intro playback
+                sleep_task = asyncio.ensure_future(asyncio.sleep(action_dur))
+                tasks.append(sleep_task)
+                done, pending = await asyncio.wait(tasks, return_when=asyncio.ALL_COMPLETED)
+                # keep intro running if it outlasts the action
+                for t in pending:
+                    await t
+            else:
+                await intro_task
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            log.warning("act+intro error: %s", e)
+        finally:
+            # resume the bridge so the next leg of the tour can be controlled
+            try:
+                self.bridge.send_pause(False)
+            except Exception:
+                pass
+            if self.active:
+                self._advance()
 
     async def _play_intro(self, wp):
         try:
             audio = await tts.ensure_audio(wp)
-            # await playback; on_done advances only if tour still active
-            await tts.play(audio, on_done=self._advance)
+            await tts.play(audio)
         except asyncio.CancelledError:
             pass
         except Exception as e:
             log.warning("intro playback error: %s", e)
-            self._advance()
 
     def _advance(self):
-        self._play_task = None
+        self._stage_task = None
         if not self.active:
             return
         self.idx += 1
@@ -192,7 +290,7 @@ class Tour:
             "total": len(self.ids),
             "state": self.state,
             "current": wp,
-            "intro": self.intro_text if self.state == "introducing" else "",
+            "intro": self.intro_text if self.state in ("acting", "introducing") else "",
         }
 
 
@@ -312,10 +410,28 @@ class WebApp:
         if mtype == "scanner":
             return self._handle_scanner(msg)
 
+        if mtype == "emergency":
+            return self._handle_emergency()
+
         if mtype == "config":
             return self._handle_config(msg)
 
         return {"ok": False, "error": f"unknown type {mtype}"}
+
+    # ---- emergency stop: stop everything and damp ----
+    def _handle_emergency(self):
+        # 1) stop the tour / any running action
+        self.tour.stop()
+        # 2) stop the joystick
+        self.bridge.send_cmd_vel(0, 0, 0)
+        self.bridge.send_move(0.0, 0.0, 0.0)
+        # 3) shut down SCAN-Planner (kill all planner nodes)
+        self._handle_scanner({"op": "stop"})
+        # 4) drop into damping mode immediately
+        self.bridge.send_damp()
+        self.control_mode = "joystick"
+        log.warning("EMERGENCY STOP: all stopped, robot in damping mode")
+        return {"ok": True, "msg": "急停：已停止所有程序，机器人进入阻尼状态"}
 
     # ---- SCAN-Planner process control ----
     def scan_running(self):
@@ -411,6 +527,8 @@ class WebApp:
                 "y": float(msg["y"]),
                 "z": float(msg.get("z", 0.3)),
                 "yaw": float(msg.get("yaw", 0.0)),
+                "yaw_at": float(msg.get("yaw_at", 0.0)),
+                "action": msg.get("action", ""),
             })
             save_config(self.cfg)
             return {"ok": True, "waypoint": wps[-1], "waypoints": wps}
@@ -426,6 +544,8 @@ class WebApp:
                 "y": round(pos[1], 3),
                 "z": round(pos[2], 3),
                 "yaw": round(yaw, 3),
+                "yaw_at": 0.0,
+                "action": "",
             })
             save_config(self.cfg)
             return {"ok": True, "waypoint": wps[-1], "waypoints": wps}
@@ -441,6 +561,27 @@ class WebApp:
             for w in wps:
                 if w["id"] == wid:
                     w["name"] = msg.get("name", w["name"])
+            save_config(self.cfg)
+            return {"ok": True, "waypoints": wps}
+
+        if op == "set_yaw_at":
+            wid = int(msg["id"])
+            val = msg.get("yaw_at")
+            try:
+                val = float(val) if val is not None else 0.0
+            except (TypeError, ValueError):
+                val = 0.0
+            for w in wps:
+                if w["id"] == wid:
+                    w["yaw_at"] = val
+            save_config(self.cfg)
+            return {"ok": True, "waypoints": wps}
+
+        if op == "set_action":
+            wid = int(msg["id"])
+            for w in wps:
+                if w["id"] == wid:
+                    w["action"] = msg.get("action", "")
             save_config(self.cfg)
             return {"ok": True, "waypoints": wps}
 

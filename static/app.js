@@ -223,15 +223,20 @@ function updateStatus() {
   $("st-yaw").textContent = `${(state.yaw * 180 / Math.PI).toFixed(1)}°`;
   const st = state.tour;
   const introRow = $("intro-row");
-  if (st.active && st.state === "introducing") {
+  const mapState = {
+    turning: "🔄 转向中", acting: "🤖 动作中", introducing: "🔊 介绍中", traveling: "🚶 前往"
+  };
+  const phase = mapState[st.state] || "进行中";
+  if (st.active && st.state !== "traveling") {
     const cur = st.current || {};
-    $("st-tour").textContent = `介绍中：${cur.name || "展品"} → ${st.intro}`;
-    $("tour-status").textContent = `🔊 正在介绍 ${cur.name || "展品"}：${st.intro}`;
+    $("st-tour").textContent = `${phase}：${cur.name || "展品"} ${st.state === "introducing" ? "→ " + st.intro : ""}`;
+    $("tour-status").textContent = `${phase} ${cur.name || "展品"}` +
+      (st.intro ? `：${st.intro}` : "");
     introRow.style.display = "flex";
   } else if (st.active) {
     const cur = st.current || {};
-    $("st-tour").textContent = `第 ${st.idx + 1}/${st.total} 点 → ${cur.name || ""}`;
-    $("tour-status").textContent = `前往展品 ${st.idx + 1}/${st.total}（${cur.name || ""}）`;
+    $("st-tour").textContent = `${phase} 第 ${st.idx + 1}/${st.total} 点 → ${cur.name || ""}`;
+    $("tour-status").textContent = `${phase} ${st.idx + 1}/${st.total}（${cur.name || ""}）`;
     introRow.style.display = "none";
   } else {
     $("st-tour").textContent = "未导览";
@@ -367,7 +372,9 @@ document.querySelectorAll(".act").forEach((btn) => {
   btn.addEventListener("click", () => {
     const act = btn.dataset.act;
     if (act === "stop") {
-      send({ type: "cmd_vel", vx: 0, vy: 0, vyaw: 0 });
+      // emergency: stop everything + damp (backend handles it)
+      send({ type: "emergency" });
+      return;
     }
     send({ type: "sport", action: act });
   });
@@ -399,6 +406,11 @@ $("btn-recenter").addEventListener("click", () => {
 function renderWaypoints() {
   const list = $("wp-list");
   list.innerHTML = "";
+  const actionOpts = [
+    ["", "无动作"], ["hello", "👋 打招呼"], ["heart", "❤️ 比心"],
+    ["dance1", "💃 舞蹈1"], ["dance2", "🕺 舞蹈2"],
+    ["stretch", "🧘 伸懒腰"], ["scrape", "🙏 拜年作揖"], ["balance", "⚖️ 平衡站"]
+  ];
   state.waypoints.forEach((wp) => {
     const li = document.createElement("li");
     li.className = "wp-item";
@@ -413,6 +425,16 @@ function renderWaypoints() {
                placeholder="输入展品介绍文字（TTS 语音）"
                value="${escHtml(wp.intro || "")}">
         <button class="preview" data-id="${wp.id}">🔊 试听</button>
+      </div>
+      <div class="wp-intro">
+        <label class="mini">转向°</label>
+        <input type="number" class="yaw-input" data-id="${wp.id}" step="5"
+               value="${wp.yaw_at !== undefined ? wp.yaw_at : 0}" title="到达后转向到的角度(度,相对地图)">
+        <label class="mini">动作</label>
+        <select class="action-select" data-id="${wp.id}">
+          ${actionOpts.map(([v, label]) =>
+            `<option value="${v}" ${(wp.action || "") === v ? "selected" : ""}>${label}</option>`).join("")}
+        </select>
       </div>`;
     list.appendChild(li);
   });
@@ -443,6 +465,16 @@ $("wp-list").addEventListener("change", (e) => {
   if (inp) {
     const id = parseInt(inp.dataset.id);
     send({ type: "tts", op: "set_intro", id: id, intro: inp.value });
+    return;
+  }
+  const yaw = e.target.closest(".yaw-input");
+  if (yaw) {
+    send({ type: "waypoint", op: "set_yaw_at", id: parseInt(yaw.dataset.id), yaw_at: parseFloat(yaw.value) });
+    return;
+  }
+  const act = e.target.closest(".action-select");
+  if (act) {
+    send({ type: "waypoint", op: "set_action", id: parseInt(act.dataset.id), action: act.value });
   }
 });
 

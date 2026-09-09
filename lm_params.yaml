@@ -1,0 +1,10 @@
+/**:
+  ros__parameters:
+    language: zh
+    text_chat_mode: true
+    llm_platform: ollama
+    useolinetts: true
+    regional_setting: China
+    camera_width: 640
+    camera_height: 480
+    camera_type: usb

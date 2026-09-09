@@ -47,4 +47,4 @@ tail -f ~/hu/ai/largemodel.log
 4. **RMW 环境**：用 `~/cyclonedds_ws` 里编译的新版 `rmw_cyclonedds`（Foxy 自带 FastRTPS 在高负载下会疯狂 `bad_alloc`——`text_chat` 报错根因）。
 5. **无 USB 相机**：`model_service` 相机初始化在无 `/dev/video*` 时会段错误，加跳过守卫（`patches/patch_camskip.py`）；画面改走 Go2 DDS 相机回退（`patches/patch_capture.py`）。
 
-详细内容见 `多模态章节完成报告.md`。
+详细内容见 `多模态章节完成报告.md`和`https://www.yahboom.com/study/Orin-Nano-SUPER/  （课程密码：lguu）`。

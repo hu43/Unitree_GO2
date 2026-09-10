@@ -1,128 +1,92 @@
-# Go2 展厅导览控制台（Web）
+# 🐕 Unitree Go2 展厅导览系统
 
-基于 SCAN-Planner 的 Go2 X 真机网页控制台：**手机预设路径点 → 自主避障导航 → 展厅解说导览**。
+基于 **Unitree Go2 X** 的完全自主展厅导览解决方案：SCAN-Planner 避障规划 + 网页控制台 + 本地大模型 AI（对话、图像/视频分析）。
 
-- **后端**：Python（rclpy + websockets），轻量 WebSocket 桥，对接已运行的 SCAN-Planner 栈
-- **前端**：2D 俯视地图 + 虚拟摇杆 + 地图点选 + 展品点位管理 + 导览模式
-- **独立环境**：依赖隔离在 `venv/`，不污染系统 Python
+<div align="center">
+  <b>机器人完全自主运行 · 手机网页操控 · 本地多模态 AI</b>
+</div>
 
-## 目录
+---
+
+## 🏗️ 系统架构
 
 ```
-hu/go2/web/
-├── app.py           # 后端入口（WebSocket + HTTP + 导览状态机）
-├── ros_bridge.py    # ROS2 桥（订阅地图/位置，发布导航/控制）
-├── config.json      # 配置（展品点位、速度、话题名）—— 网页可改
-├── static/          # 前端（index.html / style.css / app.js）
-├── venv/            # 独立 Python 环境（websockets）
-├── run_web.sh       # 一键启动
-└── README.md
+┌──────────── Jetson Orin Nano（机载电脑，Docker Humble 容器）────────────┐
+│  SCAN-Planner（避障规划）   go2_cmd_vel_bridge（运控）    Ollama（gemma3:4b）│
+│       ▲ /utlidar/* 板载雷达+定位        ▲ /api/sport         网页 AI 后端  │
+└───────────────┬────────────────────────┬───────────────────┬───────────┘
+                │ DDS（网线直连）          │ sport 指令          │ :8080
+         Go2 X 机器人 ◀──────────────────┘        手机/电脑网页 ◀┘（WiFi）
 ```
 
-## 前置条件（必须）
+- **Go2 X 板载**：L2 级激光雷达 + 定位（`/utlidar/*`），无需外接雷达
+- **Jetson 容器**：SCAN-Planner + 运控桥接 + 网页后端 + Ollama 大模型
+- **手机/电脑**：网页操控（主面板 → 导览控制台 / AI 控制界面）
 
-SCAN-Planner 真机栈正在后台运行（`navi_mode=1` 才能响应 2D Nav Goal）：
+## 📂 仓库分支
 
+| 分支 | 内容 |
+|---|---|
+| **main** | 网页导览系统（最新：含 AI 控制面板，本目录） |
+| **scan-planner** | SCAN-Planner ROS2 真机部署案例（ros2-community 分支 + 真机修改） |
+| **go2-ai** | AI 控制面板初版存档 |
+
+## 🖥️ 网页功能
+
+### 导览控制台（/console）
+- **2D 占据地图**（板载雷达实时建图）+ 机器人位置/朝向
+- **虚拟摇杆**运动控制（独立 sport 通道，与规划器互不干扰）
+- **展品点位**：摇杆记录 / 地图点选 / 不可用时重录 / 顺序编排（↑↓）
+- **自主导览**：按编排顺序避障走位 → 到达展品转向 + 动作 + 语音介绍（同步）→ 下一展品
+- **SCAN-Planner 一键启停**
+- **急停**：停止一切 + 机器人立即阻尼
+
+### AI 控制界面（/ai）
+- **基础 AI 对话**：本地 Ollama gemma3:4b，多轮上下文，`/bye` 或按钮结束
+- **图像/视频分析**：📷 拍照 / 📁 导入图片视频 → gemma3:4b 多模态分析（视频自动抽 3 帧），中文回复
+- 🏛️ 展厅专用 AI 对话、🧠 智能 AI 控制（占位，开发中）
+
+## 🛠️ 部署
+
+### Jetson 机载（正式运行）
+系统已部署为 Docker 容器 + systemd 自启，详见机载 `/home/unitree/hu/go2/README.md`。
+- 访问：`http://<Jetson-IP>:8080`
+- 重启整套：`sudo systemctl restart go2-tour.service`
+
+### PC 开发
 ```bash
-cd ~/unitree_sdk2-main/example/user/SCAN-Planner
-source setup_scan_planner.sh
-ros2 launch scan_planner real_robot.launch.py navi_mode:=1 bridge_enable:=true
+cd hu/go2/web
+python3 -m venv venv --without-pip 2>/dev/null; venv/bin/python get-pip.py  # 或已建好的 venv
+venv/bin/pip install websockets edge-tts
+# 需要 ROS2 Humble 环境（rclpy）+ unitree_ros2 的 unitree_api 消息包
+source /opt/ros/humble/setup.bash && source <unitree_ros2>/install/setup.bash
+venv/bin/python app.py
 ```
 
-## 启动
-
+### 容器内编译 SCAN-Planner（改代码后）
 ```bash
-cd ~/hu/go2/web
-./run_web.sh
+docker exec -it go2_humble bash
+source /opt/ros/humble/setup.bash
+cd /home/unitree/hu/go2
+colcon build --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=Release \
+  --packages-select unitree_api scan_planner_msgs bspline_opt plan_env path_searching traj_utils scan_planner go2_cmd_vel_bridge
 ```
 
-浏览器（电脑/手机同一局域网）访问 **`http://<本机IP>:8080`**。
+## ⚙️ 关键参数（config.json）
 
-页面结构：
-- **`/`（主面板）**：Go2 机器狗主面板，显示系统/机器人状态概览，点击「进入展厅导览控制台」跳转
-- **`/console`（导览控制台）**：完整的导览控制台（地图/摇杆/展品/语音），顶部有「返回主面板」按钮
-（手机需连到与机器人相同的网络，如 Go2 的 WiFi 或同一路由器。）
+| 键 | 说明 |
+|---|---|
+| `max_speed` | 摇杆最大速度（m/s） |
+| `reach_threshold` | 导览到达判定距离（m） |
+| `waypoints` | 展品点位（x/y/z/yaw/转向角/动作/介绍文字），网页可编辑自动保存 |
 
-## 功能
+## 🙏 致谢
 
-### 🕹️ 运动控制
-- 虚拟摇杆：拖动控制前进/转向/横移，松手即停
-  - **摇杆走独立 sport 通道**（`/api/sport/request` 的 Move，同官方遥控器 SportClient.Move），**不与 SCAN-Planner 运控冲突**
-- 按钮：站立 / 解除锁定 START（RecoveryStand）/ 卧倒（StandDown）/ **急停**
-- **⛔ 急停**：一键停止所有——终止导览、关闭 SCAN-Planner 全部进程、停摇杆、**机器人立即进入阻尼状态（Damp）**，无论当前在干什么
-- 速度滑块：限制最大速度（`max_speed`）
+- [SCAN-Planner](https://github.com/wuyi2121/SCAN-Planner)（Han Zheng 等，arXiv:2606.19555）及其 ROS2 社区移植
+- [unitree_ros2](https://github.com/unitreerobotics/unitree_ros2) / [unitree_sdk2_python](https://github.com/unitreerobotics/unitree_sdk2_python)
+- [Ollama](https://ollama.com) / Google gemma3:4b（本地多模态大模型）
+- 亚博智能（largemodel 多模态教程项目）
 
-### ⚙️ SCAN-Planner 系统控制（导览台内）
-- **🚀 启动 SCAN-Planner**：一键运行真实机器人导航栈（`navi_mode:=1 bridge_enable:=true`，机器人会站立）
-- **⏹ 停止**：终止 SCAN-Planner 全部节点
-- 日志：`web/log/scan_planner.log`
-- 状态实时显示（运行中/已停止）
+## ⚖️ License
 
-### 🔀 控制模式（摇杆 ↔ 导览自动切换）
-- **摇杆模式**（默认）：网页摇杆直接控制机器人（sport Move），SCAN-Planner 只做建图，不参与运控
-- **导览模式**：点「开始导览」→ 控制权交给 SCAN-Planner（发 2D Nav Goal，closed_loop_controller 经 bridge 控制），**摇杆自动禁用**（页面半透明提示）
-- **任意时刻动摇杆**：自动停止导览（发 StopMove + 让 SCAN-Planner 回 WAIT_TARGET）并切回摇杆控制
-- 急停按钮在两种模式下都可用
-
-### 🗺️ 地图
-- 2D 俯视占据栅格地图（来自 `/grid_map/occupancy`，按高度着色）
-- 机器人实时位置 + 朝向箭头
-- 拖拽平移、滚轮缩放、一键居中
-- **紧凑布局**：地图缩小（桌面 42% 宽、手机顶部小条），**以按键控制为主**，地图只做参考查看
-
-### 📍 展品点位（可配置，存 `config.json`）
-两种方式设置点位：
-1. **摇杆 + 记录**：把机器人开到展品前 → 点「记录当前点」→ 存真实坐标
-2. **地图点选**：切到「加路径点」模式 → 点地图任意位置 → 生成点位
-
-列表可勾选、删除；**每个展品可编辑介绍语音文字**（点开列表项输入文字 + 🔊 试听）；改动自动保存到服务器 `config.json`。
-
-### 🗣️ 语音导览（展厅解说）
-- **到达展品自动介绍**：导览中机器人到达展品点 → 自动播放该展品语音介绍 → **介绍完才进入下一个展品**
-- **文字 → 语音**：介绍文字用 `edge-tts`（微软中文神经网络语音）实时合成，缓存到 `audio/`（文字改了自动重新合成）
-- **试听**：编辑介绍文字后点 🔊 试听，先听效果再保存
-- **跳过介绍**：导览中可随时「⏭ 跳过介绍」直接进入下一展品
-- **DIY 编排**：展品点位 + 介绍文字自由增删改，完全自定义
-- 播放设备：后端所在电脑的扬声器（ffplay 播放到声卡）；展厅建议把导览台电脑接音箱
-- 可选自定义音频：展品配置加 `"audio": "文件名.mp3"`（放 `audio/` 目录）则优先播放该文件
-
-### 🔄 转向 + 动作编排（每展品可配）
-到达展品后流程：**转向（转到指定朝向）→ 动作 + 语音介绍（同步进行）→ 全部完成才进入下一展品**
-
-每个展品可独立编排：
-- **转向角度（°）**：到达后原地旋转到指定朝向（相对地图，如 90° 面向观众）；设 0 = 不转向
-- **动作**（参考宇树官方 sports_services 文档）：
-  - 👋 打招呼（Hello）/ ❤️ 比心（Heart）/ 💃 舞蹈1（Dance1）/ 🕺 舞蹈2（Dance2）
-  - 🧘 伸懒腰（Stretch）/ 🙏 拜年作揖（Scrape）/ ⚖️ 平衡站（BalanceStand）/ 无动作
-- 动作与语音介绍**同步执行**，都完成才去下一个
-- **自动防冲突**：转向/动作期间，web 端自动暂停 bridge 的 Move 指令（`/go2/motion_pause`）并让 SCAN-Planner 释放控制，完成后恢复——动作不会被运控打断
-- 页面展品列表可直接编辑（转向角度输入 + 动作下拉），改动自动保存 `config.json`
-- 注：Go2 官方文档没有"握手"和"坐下"动作，因此不提供（不瞎猜）
-
-### 🚶 导览模式（自主避障导航）
-1. 在展品列表**勾选**要导览的展品（顺序 = 勾选顺序）
-2. 点「开始导览」→ 后端依次向 `/move_base_simple/goal` 发路径点
-3. SCAN-Planner 自主避障规划，机器人沿路点行走
-4. 到达一个点（距离 < `reach_threshold`）→ 自动发下一个
-5. 页面实时显示导览进度 + 当前目标
-
-> 后续可在每个展品点挂接解说（预留：导览到点时前端可触发语音/文案）。
-
-## 配置说明（config.json）
-
-| 键 | 默认 | 说明 |
-|---|---|---|
-| `host` / `port` | `0.0.0.0` / `8080` | 监听地址（0.0.0.0 = 局域网可访问） |
-| `topics` | — | ROS2 话题名（一般不用改） |
-| `map_downsample` | 4000 | 地图点降采样上限（流畅度） |
-| `push_hz` | 10 | 地图推送频率 |
-| `reach_threshold` | 0.4 | 导览到达判定距离（米） |
-| `max_speed` | 0.5 | 摇杆最大速度（米/秒） |
-| `waypoints` | — | 展品点位数组（网页可增删改） |
-
-## 常见问题
-
-- **页面连不上（红色未连接）**：确认 SCAN-Planner 在跑、后端启动了、手机与机器人在同一网络
-- **地图空白**：等 SCAN-Planner 建图几秒；确认 `/grid_map/occupancy` 有数据（`ros2 topic hz /grid_map/occupancy`）
-- **导览不动**：确认 SCAN-Planner 是 `navi_mode=1`；检查机器人在 odom 系位置与路径点距离
-- **conda 冲突**：`run_web.sh` 已自动剔除 miniconda；若手动运行用 `./venv/bin/python3 app.py`
+Apache-2.0（沿用上游；第三方组件见各自许可）

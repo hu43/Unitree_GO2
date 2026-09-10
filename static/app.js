@@ -66,6 +66,7 @@ function handleMsg(msg) {
     $("speed-slider").value = state.maxSpeed;
     $("speed-val").textContent = state.maxSpeed.toFixed(2);
     renderWaypoints();
+    renderTourOrder();
   } else if (msg.type === "state") {
     state.mapPoints = msg.map || [];
     state.pos = msg.pos || { x: 0, y: 0, z: 0 };
@@ -415,10 +416,11 @@ function renderWaypoints() {
     const li = document.createElement("li");
     li.className = "wp-item";
     li.innerHTML = `
-      <input type="checkbox" data-id="${wp.id}" ${state.selected === wp.id ? "checked" : ""}>
+      <input type="checkbox" class="wp-check" data-id="${wp.id}" ${isInOrder(wp.id) ? "checked" : ""}>
       <span class="wpid">#${wp.id}</span>
       <span class="wpname">${wp.name}</span>
       <span class="wpcoord">(${wp.x.toFixed(1)}, ${wp.y.toFixed(1)})</span>
+      <button class="repos" data-id="${wp.id}" title="用摇杆开到新位置后点此重录该点位">🔁 重录</button>
       <button class="del" data-id="${wp.id}">✕</button>
       <div class="wp-intro">
         <input type="text" class="intro-input" data-id="${wp.id}"
@@ -440,6 +442,42 @@ function renderWaypoints() {
   });
 }
 
+// ---------------- tour order (编排) ----------------
+const tourOrder = [];   // waypoint ids in guided order
+
+function isInOrder(id) {
+  return tourOrder.includes(id);
+}
+
+function renderTourOrder() {
+  const ol = $("tour-order");
+  ol.innerHTML = "";
+  if (tourOrder.length === 0) {
+    ol.innerHTML = '<li class="tour-empty">未选择展品，勾选上方展品加入导览顺序</li>';
+    return;
+  }
+  tourOrder.forEach((id, i) => {
+    const wp = state.waypoints.find((w) => w.id === id);
+    if (!wp) return;
+    const li = document.createElement("li");
+    li.innerHTML = `
+      <span class="o-idx">${i + 1}</span>
+      <span class="o-name">${wp.name || "#" + wp.id}</span>
+      <span class="o-tools">
+        <button class="mv up" data-id="${id}" ${i === 0 ? "disabled" : ""}>↑</button>
+        <button class="mv down" data-id="${id}" ${i === tourOrder.length - 1 ? "disabled" : ""}>↓</button>
+        <button class="rm" data-id="${id}">✕</button>
+      </span>`;
+    ol.appendChild(li);
+  });
+}
+
+function orderSyncCheckboxes() {
+  document.querySelectorAll(".wp-check").forEach((cb) => {
+    cb.checked = isInOrder(parseInt(cb.dataset.id));
+  });
+}
+
 function escHtml(s) {
   return String(s).replace(/&/g, "&amp;").replace(/</g, "&lt;")
     .replace(/>/g, "&gt;").replace(/"/g, "&quot;");
@@ -451,6 +489,11 @@ $("wp-list").addEventListener("click", (e) => {
     send({ type: "waypoint", op: "del", id: parseInt(del.dataset.id) });
     return;
   }
+  const repos = e.target.closest(".repos");
+  if (repos) {
+    send({ type: "waypoint", op: "reposition", id: parseInt(repos.dataset.id) });
+    return;
+  }
   const prev = e.target.closest(".preview");
   if (prev) {
     const id = parseInt(prev.dataset.id);
@@ -460,7 +503,20 @@ $("wp-list").addEventListener("click", (e) => {
   }
 });
 
+// checkbox -> join/leave tour order
 $("wp-list").addEventListener("change", (e) => {
+  const cb = e.target.closest(".wp-check");
+  if (cb) {
+    const id = parseInt(cb.dataset.id);
+    const idx = tourOrder.indexOf(id);
+    if (cb.checked && idx === -1) {
+      tourOrder.push(id);
+    } else if (!cb.checked && idx !== -1) {
+      tourOrder.splice(idx, 1);
+    }
+    renderTourOrder();
+    return;
+  }
   const inp = e.target.closest(".intro-input");
   if (inp) {
     const id = parseInt(inp.dataset.id);
@@ -478,6 +534,32 @@ $("wp-list").addEventListener("change", (e) => {
   }
 });
 
+// tour order list: up/down/remove
+$("tour-order").addEventListener("click", (e) => {
+  const up = e.target.closest(".mv.up");
+  const down = e.target.closest(".mv.down");
+  const rm = e.target.closest(".rm");
+  if (up) {
+    const id = parseInt(up.dataset.id);
+    const i = tourOrder.indexOf(id);
+    if (i > 0) { [tourOrder[i - 1], tourOrder[i]] = [tourOrder[i], tourOrder[i - 1]]; }
+  } else if (down) {
+    const id = parseInt(down.dataset.id);
+    const i = tourOrder.indexOf(id);
+    if (i !== -1 && i < tourOrder.length - 1) {
+      [tourOrder[i + 1], tourOrder[i]] = [tourOrder[i], tourOrder[i + 1]];
+    }
+  } else if (rm) {
+    const id = parseInt(rm.dataset.id);
+    const i = tourOrder.indexOf(id);
+    if (i !== -1) tourOrder.splice(i, 1);
+  } else {
+    return;
+  }
+  renderTourOrder();
+  orderSyncCheckboxes();
+});
+
 $("btn-record").addEventListener("click", () => {
   send({ type: "waypoint", op: "record", name: `展品${state.waypoints.length + 1}` });
 });
@@ -489,13 +571,18 @@ $("btn-save").addEventListener("click", () => {
 
 // ---------------- tour ----------------
 $("btn-tour-start").addEventListener("click", () => {
-  const checked = [...document.querySelectorAll("#wp-list input:checked")]
-    .map((i) => parseInt(i.dataset.id));
+  const checked = tourOrder;
   if (checked.length === 0) {
-    alert("请先勾选要导览的展品点");
+    alert("请先勾选要导览的展品（加入导览顺序）");
     return;
   }
   send({ type: "tour", op: "start", ids: checked });
+});
+
+$("btn-tour-clear").addEventListener("click", () => {
+  tourOrder.length = 0;
+  renderTourOrder();
+  orderSyncCheckboxes();
 });
 
 $("btn-tour-stop").addEventListener("click", () => {

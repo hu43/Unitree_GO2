@@ -138,6 +138,32 @@ main { flex: 1; display: flex; min-height: 0; }
 #wp-list li .wpname { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 #wp-list li .wpcoord { color: var(--muted); font-size: 11px; }
 #wp-list li .del { color: var(--danger); cursor: pointer; border: none; background: none; font-size: 15px; }
+#wp-list li .repos {
+  color: var(--warn); cursor: pointer; border: 1px solid #6a5a30; background: #2a2518;
+  border-radius: 5px; font-size: 11px; padding: 2px 6px; white-space: nowrap;
+}
+
+/* tour order 编排 */
+.tour-order { list-style: none; margin: 6px 0 8px; max-height: 170px; overflow-y: auto; }
+.tour-order li {
+  display: flex; align-items: center; gap: 8px; padding: 6px 8px;
+  background: #121a2c; border: 1px solid #232d42; border-radius: 6px; margin-bottom: 4px;
+  font-size: 13px;
+}
+.tour-order .o-idx {
+  width: 20px; height: 20px; border-radius: 50%; background: var(--accent); color: #fff;
+  display: inline-flex; align-items: center; justify-content: center; font-size: 12px; font-weight: 700;
+  flex-shrink: 0;
+}
+.tour-order .o-name { flex: 1; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.tour-order .o-tools { display: flex; gap: 4px; }
+.tour-order .mv, .tour-order .rm {
+  width: 26px; height: 26px; border-radius: 5px; border: 1px solid #33415e;
+  background: var(--card2); color: var(--fg); cursor: pointer; font-size: 13px;
+}
+.tour-order .mv:disabled { opacity: .3; cursor: default; }
+.tour-order .rm { color: var(--danger); }
+.tour-order .tour-empty { color: var(--muted); background: transparent; border-style: dashed; text-align: center; }
 
 .tour-row { display: flex; gap: 8px; }
 .tour-row button {

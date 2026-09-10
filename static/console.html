@@ -62,11 +62,15 @@
       <!-- 导览 -->
       <section class="card">
         <h2>🚶 导览模式</h2>
+        <p class="hint">勾选展品加入导览顺序，可上下调整顺序、移除；某点位不可用可先摇杆开到新位置再点"🔁 重录"</p>
+        <ol id="tour-order" class="tour-order">
+          <li class="tour-empty">未选择展品</li>
+        </ol>
         <div class="tour-row">
+          <button id="btn-tour-clear">🗑 清空顺序</button>
           <button id="btn-tour-start">▶ 开始导览</button>
           <button id="btn-tour-stop" class="danger">⏹ 停止</button>
         </div>
-        <p class="hint">勾选展品（下方列表），按顺序导览；机器人沿路径点自主避障行走，到达展品自动语音介绍，介绍完才进入下一个</p>
         <div id="tour-status" class="tour-status">未开始</div>
         <div class="tour-row" id="intro-row" style="display:none">
           <button id="btn-skip-intro">⏭ 跳过介绍</button>

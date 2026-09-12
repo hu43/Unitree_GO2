@@ -6,6 +6,7 @@ const $ = (id) => document.getElementById(id);
 const state = {
   ws: null,
   chatOpen: false,   // ollama 会话是否开启
+  streamingEl: null, // 当前流式回复的 DOM 元素
 };
 
 // ---------------- WebSocket ----------------
@@ -31,15 +32,26 @@ function sendAi(obj) {
 function handleAi(m) {
   const box = $("chat-box");
   if (m.op === "output") {
-    // ollama 原始输出（流式块）
-    let text = (m.text || "");
-    // 过滤交互提示符
-    text = text.replace(/^>>>\s*/gm, "");
-    if (m.final && text.trim()) {
-      const div = document.createElement("div");
-      div.className = "ai";
-      div.textContent = text.trim();
-      box.appendChild(div);
+    if (m.final) {
+      // 流结束：若 final 消息本身带文本（非流式后端兼容），先补上
+      if (m.text) {
+        if (!state.streamingEl) {
+          state.streamingEl = document.createElement("div");
+          state.streamingEl.className = "ai";
+          box.appendChild(state.streamingEl);
+        }
+        state.streamingEl.textContent += m.text;
+      }
+      state.streamingEl = null;
+      box.scrollTop = box.scrollHeight;
+    } else {
+      // 流式块：追加到当前 AI 消息（没有则新建）
+      if (!state.streamingEl) {
+        state.streamingEl = document.createElement("div");
+        state.streamingEl.className = "ai";
+        box.appendChild(state.streamingEl);
+      }
+      state.streamingEl.textContent += (m.text || "");
       box.scrollTop = box.scrollHeight;
     }
   } else if (m.op === "started") {

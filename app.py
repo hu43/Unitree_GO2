@@ -11,6 +11,7 @@ through ros_bridge.RosBridge over standard ROS2 topics.
 
 import asyncio
 import base64
+import faulthandler
 import json
 import logging
 import math
@@ -19,6 +20,12 @@ import signal
 import subprocess
 import time
 import urllib.request
+
+import aiohttp
+
+# 诊断：每 20s 把所有线程栈 dump 到 threads.log（定位阻塞用）
+_fh = open("/home/unitree/hu/go2/threads.log", "w")
+faulthandler.dump_traceback_later(20, repeat=True, file=_fh)
 
 import websockets
 from websockets.datastructures import Headers
@@ -460,18 +467,20 @@ class WebApp:
         with urllib.request.urlopen(req, timeout=timeout) as r:
             return json.loads(r.read())
 
-    async def _ai_push(self, payload):
-        if self.ai_client:
+    async def _ai_push(self, payload, client=None):
+        target = client or self.ai_client
+        if target:
             try:
-                await self.ai_client.send(json.dumps({"type": "ai", **payload}))
+                await target.send(json.dumps({"type": "ai", **payload}))
             except Exception:
                 pass
 
     async def _ai_check_and_start(self):
         try:
-            loop = asyncio.get_event_loop()
-            tags = await loop.run_in_executor(
-                None, lambda: self._ollama_get("/api/tags", timeout=10))
+            timeout = aiohttp.ClientTimeout(total=15)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(self.OLLAMA_API + "/api/tags") as r:
+                    tags = await r.json()
             models = [m.get("name", "") for m in tags.get("models", [])]
             if not any(m.split(":")[0] == self.AI_MODEL.split(":")[0] for m in models):
                 await self._ai_push({
@@ -483,6 +492,62 @@ class WebApp:
         except Exception as e:
             await self._ai_push({"op": "error", "error": f"ollama 服务不可达: {e}"})
 
+    def _handle_ai(self, msg, websocket):
+        op = msg.get("op")
+        if op == "start":
+            self.ai_client = websocket
+            self.ai_history = []
+            asyncio.ensure_future(self._ai_check_and_start())
+            return {"ok": True}
+        if op == "end":
+            # 先捕获客户端再清空，否则 ended 消息推不出去
+            client = self.ai_client
+            self.ai_client = None
+            self.ai_started = False
+            self.ai_history = []
+            asyncio.ensure_future(self._ai_push({"op": "ended"}, client=client))
+            return {"ok": True}
+        if not self.ai_started:
+            return {"ok": False, "error": "AI 会话未启动，请先启动对话"}
+        if op == "send":
+            asyncio.ensure_future(self._ai_chat(msg.get("text", "")))
+            return {"ok": True}
+        if op == "image":
+            asyncio.ensure_future(
+                self._ai_image(msg.get("data", ""), msg.get("name", "camera.jpg")))
+            return {"ok": True}
+        if op == "video":
+            asyncio.ensure_future(
+                self._ai_video(msg.get("data", ""), msg.get("name", "camera.mp4")))
+            return {"ok": True}
+        return {"ok": False, "error": f"unknown ai op {op}"}
+
+    async def _ai_stream(self):
+        """向 ollama 发起流式 chat（messages 取 self.ai_history），逐段推给前端。
+        返回完整回复文本。"""
+        timeout = aiohttp.ClientTimeout(total=300)
+        full = ""
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(
+                    self.OLLAMA_API + "/api/chat",
+                    json={"model": self.AI_MODEL,
+                          "messages": self.ai_history,
+                          "stream": True}) as resp:
+                resp.raise_for_status()
+                async for raw in resp.content:
+                    line = raw.decode(errors="replace").strip()
+                    if not line:
+                        continue
+                    chunk = json.loads(line)
+                    piece = chunk.get("message", {}).get("content", "")
+                    if piece:
+                        full += piece
+                        await self._ai_push(
+                            {"op": "output", "text": piece, "final": False})
+                    if chunk.get("done", False):
+                        break
+        return full
+
     async def _ai_chat(self, text):
         if self.ai_busy:
             await self._ai_push({"op": "error", "error": "上一条还在回复中"})
@@ -490,66 +555,24 @@ class WebApp:
         self.ai_busy = True
         try:
             self.ai_history.append({"role": "user", "content": text})
-            loop = asyncio.get_event_loop()
-            resp = await loop.run_in_executor(
-                None, lambda: self._ollama_post("/api/chat", {
-                    "model": self.AI_MODEL,
-                    "messages": self.ai_history,
-                    "stream": False}, timeout=180))
-            content = resp.get("message", {}).get("content", "").strip()
-            self.ai_history.append({"role": "assistant", "content": content})
-            await self._ai_push({"op": "output", "text": content, "final": True})
+            full = await self._ai_stream()
+            if full.strip():
+                self.ai_history.append({"role": "assistant", "content": full.strip()})
+            await self._ai_push({"op": "output", "text": "", "final": True})
+            log.info("ai chat done (%d chars)", len(full))
         except Exception as e:
-            if self.ai_history and self.ai_history[-1]["role"] == "user":
-                self.ai_history.pop()  # drop failed user msg so it can be retried
+            if self.ai_history and self.ai_history[-1].get("role") == "user":
+                self.ai_history.pop()
+            await self._ai_push({"op": "output", "text": "", "final": True})
             await self._ai_push({"op": "error", "error": str(e)})
+            log.error("ai chat failed: %s", e)
         finally:
             self.ai_busy = False
 
-    def _handle_ai(self, msg, websocket):
-        op = msg.get("op")
-        if op == "start":
-            self.ai_client = websocket
-            self.ai_history = []
-            asyncio.create_task(self._ai_check_and_start())
-            return None
-
-        if op == "image":
-            self.ai_client = websocket
-            asyncio.create_task(self._ai_image(msg.get("data", ""), msg.get("name", "camera.jpg")))
-            return None
-
-        if op == "video":
-            self.ai_client = websocket
-            asyncio.create_task(self._ai_video(msg.get("data", ""), msg.get("name", "video.mp4")))
-            return None
-
-        if op == "send":
-            if not self.ai_started:
-                return {"type": "ai", "op": "error", "error": "对话未启动"}
-            text = msg.get("text", "")
-            if text.startswith("/"):
-                if text.strip() == "/bye":
-                    self.ai_history = []
-                    asyncio.create_task(self._ai_push({"op": "ended"}))
-                return None
-            self.ai_client = websocket
-            asyncio.create_task(self._ai_chat(text))
-            return None
-
-        if op == "end":
-            self.ai_history = []
-            self.ai_started = False
-            asyncio.create_task(self._ai_push({"op": "ended"}))
-            return None
-
-        return {"type": "ai", "op": "error", "error": f"unknown ai op {op}"}
-
-    # ---- image / video analysis (multimodal gemma3:4b) ----
     async def _ai_chat_images(self, prompt, image_paths):
-        """Send a prompt plus one or more images to ollama and push the reply."""
+        """图片/视频帧分析：本地图片转 base64，流式交给 ollama 逐段返回。"""
         if self.ai_busy:
-            await self._ai_push({"op": "error", "error": "上一条还在分析中"})
+            await self._ai_push({"op": "error", "error": "上一条还在回复中"})
             return
         self.ai_busy = True
         try:
@@ -558,19 +581,17 @@ class WebApp:
                 with open(p, "rb") as f:
                     images.append(base64.b64encode(f.read()).decode())
             self.ai_history.append({"role": "user", "content": prompt, "images": images})
-            loop = asyncio.get_event_loop()
-            resp = await loop.run_in_executor(
-                None, lambda: self._ollama_post("/api/chat", {
-                    "model": self.AI_MODEL,
-                    "messages": self.ai_history,
-                    "stream": False}, timeout=300))
-            content = resp.get("message", {}).get("content", "").strip()
-            self.ai_history.append({"role": "assistant", "content": content})
-            await self._ai_push({"op": "output", "text": content, "final": True})
+            full = await self._ai_stream()
+            if full.strip():
+                self.ai_history.append({"role": "assistant", "content": full.strip()})
+            await self._ai_push({"op": "output", "text": "", "final": True})
+            log.info("ai image analysis done (%d chars)", len(full))
         except Exception as e:
             if self.ai_history and self.ai_history[-1].get("images"):
                 self.ai_history.pop()
+            await self._ai_push({"op": "output", "text": "", "final": True})
             await self._ai_push({"op": "error", "error": str(e)})
+            log.error("ai image analysis failed: %s", e)
         finally:
             self.ai_busy = False
 
@@ -879,12 +900,31 @@ async def ws_handler(websocket):
         pass
     finally:
         app.clients.discard(websocket)
+        if app.ai_client is websocket:
+            app.ai_client = None
+            app.ai_started = False
         log.info("client disconnected")
+
+
+async def ai_startup_probe():
+    """诊断：启动时立即测 ollama GET 是否在 web 进程内正常工作。"""
+    t0 = asyncio.get_event_loop().time()
+    try:
+        timeout = aiohttp.ClientTimeout(total=15)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get("http://127.0.0.1:11434/api/tags") as r:
+                data = await r.json()
+        log.info("AI_PROBE: OK %.1fs models=%d",
+                 asyncio.get_event_loop().time() - t0, len(data.get("models", [])))
+    except Exception as e:
+        log.error("AI_PROBE: FAILED after %.1fs: %s",
+                  asyncio.get_event_loop().time() - t0, e)
 
 
 async def main():
     cfg = load_config()
     bridge, thread = rb.start_bridge(cfg)
+    asyncio.create_task(ai_startup_probe())
 
     app = WebApp(cfg, bridge)
     WebApp.inst = app

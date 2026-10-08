@@ -93,6 +93,7 @@ class Tour:
         self.intro_wp = None
         self._stage_task = None  # current async stage (turn / act+intro)
         self._turn_task = None
+        self._intro_task = None  # current narration playback task
         self._yaw_tolerance = math.radians(4.0)
         self._yaw_k = 1.0        # proportional turn gain
         self._max_vyaw = 0.6     # max turn rate
@@ -111,11 +112,12 @@ class Tour:
         self.active = False
         self.state = "idle"
         self.intro_text = ""
-        for task in (self._stage_task, self._turn_task):
+        for task in (self._stage_task, self._turn_task, self._intro_task):
             if task:
                 task.cancel()
         self._stage_task = None
         self._turn_task = None
+        self._intro_task = None
         # Halt the robot so the joystick can take over cleanly, then publish a
         # goal at the current position so SCAN-Planner finishes any running
         # trajectory and returns to WAIT_TARGET (releasing /cmd_vel).
@@ -241,6 +243,7 @@ class Tour:
             _, action_dur = self.bridge.send_action(action_name)
             # start intro playback concurrently
             intro_task = asyncio.create_task(self._play_intro(wp))
+            self._intro_task = intro_task
             tasks = [intro_task]
             if action_dur > 0:
                 # wait for both: action duration and intro playback
@@ -257,6 +260,11 @@ class Tour:
         except Exception as e:
             log.warning("act+intro error: %s", e)
         finally:
+            # stop narration immediately if it is still playing (tour stopped /
+            # stage cancelled); tts kills ffplay on cancellation
+            if self._intro_task and not self._intro_task.done():
+                self._intro_task.cancel()
+            self._intro_task = None
             # resume the bridge so the next leg of the tour can be controlled
             try:
                 self.bridge.send_pause(False)
@@ -267,8 +275,10 @@ class Tour:
 
     async def _play_intro(self, wp):
         try:
-            audio = await tts.ensure_audio(wp)
-            await tts.play(audio)
+            # Streaming TTS: speak() pipes edge-tts chunks straight into ffplay,
+            # so narration starts as soon as the first chunk arrives.
+            text = wp.get("intro", "").strip() or tts.DEFAULT_INTRO
+            await tts.speak(text, tts.target_audio(wp))
         except asyncio.CancelledError:
             pass
         except Exception as e:
@@ -309,9 +319,11 @@ class Tour:
 # --------------------------------------------------------------------------
 # SCAN-Planner launch command (real-robot, 2D Nav Goal mode, bridge on)
 SCAN_LAUNCH_CMD = (
-    "cd ~/unitree_sdk2-main/example/user/SCAN-Planner && "
-    "source setup_scan_planner.sh && "
-    "ros2 launch scan_planner real_robot.launch.py navi_mode:=1 bridge_enable:=true"
+    "source /opt/ros/humble/setup.bash && "
+    "source /home/unitree/hu/go2/install/setup.bash && "
+    "export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp "
+    "CYCLONEDDS_URI=file:///home/unitree/hu/go2/cyclonedds_eth0.xml && "
+    "ros2 launch scan_planner real_robot.launch.py navi_mode:=1 bridge_enable:=true rviz:=false"
 )
 SCAN_LOG_PATH = os.path.join(BASE_DIR, "log", "scan_planner.log")
 
@@ -328,6 +340,7 @@ class WebApp:
         self.ai_client = None           # websocket that owns the AI session
         self.ai_started = False
         self.ai_busy = False
+        self.ai_model = self.AI_MODEL   # 当前会话模型，可由前端指定
 
     async def broadcast_state(self):
         """Push the current map + robot state to all clients."""
@@ -452,7 +465,7 @@ class WebApp:
 
     # ---- AI chat session (Ollama REST API on host: 11434) ----
     OLLAMA_API = "http://127.0.0.1:11434"
-    AI_MODEL = "gemma3:4b"
+    AI_MODEL = "gemma4:e2b-it-qat"
 
     def _ollama_post(self, path, payload, timeout=120):
         req = urllib.request.Request(
@@ -482,22 +495,39 @@ class WebApp:
                 async with session.get(self.OLLAMA_API + "/api/tags") as r:
                     tags = await r.json()
             models = [m.get("name", "") for m in tags.get("models", [])]
-            if not any(m.split(":")[0] == self.AI_MODEL.split(":")[0] for m in models):
+            if not any(m.split(":")[0] == self.ai_model.split(":")[0] for m in models):
                 await self._ai_push({
                     "op": "error",
-                    "error": f"模型 {self.AI_MODEL} 未下载。请在 Jetson 上运行: ollama pull {self.AI_MODEL}"})
+                    "error": f"模型 {self.ai_model} 未下载。请在 Jetson 上运行: ollama pull {self.ai_model}"})
                 return
             self.ai_started = True
-            await self._ai_push({"op": "started"})
+            await self._ai_push({"op": "started", "model": self.ai_model})
         except Exception as e:
             await self._ai_push({"op": "error", "error": f"ollama 服务不可达: {e}"})
+
+    async def _ai_list_models(self, client=None):
+        """把 ollama 已下载的模型列表推给前端，供模型下拉框使用。"""
+        try:
+            timeout = aiohttp.ClientTimeout(total=10)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(self.OLLAMA_API + "/api/tags") as r:
+                    tags = await r.json()
+            models = [m.get("name", "") for m in tags.get("models", []) if m.get("name")]
+            await self._ai_push(
+                {"op": "models", "models": models, "default": self.ai_model}, client=client)
+        except Exception as e:
+            await self._ai_push({"op": "models", "models": [], "error": str(e)}, client=client)
 
     def _handle_ai(self, msg, websocket):
         op = msg.get("op")
         if op == "start":
             self.ai_client = websocket
             self.ai_history = []
+            self.ai_model = msg.get("model") or self.AI_MODEL
             asyncio.ensure_future(self._ai_check_and_start())
+            return {"ok": True, "model": self.ai_model}
+        if op == "models":
+            asyncio.ensure_future(self._ai_list_models(client=websocket))
             return {"ok": True}
         if op == "end":
             # 先捕获客户端再清空，否则 ended 消息推不出去
@@ -530,9 +560,10 @@ class WebApp:
         async with aiohttp.ClientSession(timeout=timeout) as session:
             async with session.post(
                     self.OLLAMA_API + "/api/chat",
-                    json={"model": self.AI_MODEL,
+                    json={"model": self.ai_model,
                           "messages": self.ai_history,
-                          "stream": True}) as resp:
+                          "stream": True,
+                          "think": False}) as resp:
                 resp.raise_for_status()
                 async for raw in resp.content:
                     line = raw.decode(errors="replace").strip()
@@ -707,9 +738,8 @@ class WebApp:
 
             async def _preview():
                 try:
-                    path = await tts.synthesize(text, os.path.join(
-                        tts.AUDIO_DIR, f"preview_{int(time.time())}.mp3"))
-                    await tts.play(path)
+                    path = os.path.join(tts.AUDIO_DIR, f"preview_{int(time.time())}.mp3")
+                    await tts.speak(text, path)  # streamed, cached to path
                 except Exception as e:
                     log.warning("preview error: %s", e)
             asyncio.create_task(_preview())

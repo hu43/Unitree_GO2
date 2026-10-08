@@ -3,7 +3,10 @@
 
 - edge-tts (Microsoft online neural voices) for Chinese narration synthesis
 - ffplay for playback to the local sound card
-- Audio files are cached under <web>/audio/intro_<id>.mp3
+- Narration is streamed: edge-tts audio chunks are piped straight into ffplay
+  stdin, so playback starts as soon as the first chunk arrives instead of
+  waiting for the whole clip. The complete mp3 is still cached under
+  <web>/audio/intro_<id>.mp3 so later plays are instant and offline.
 """
 
 import asyncio
@@ -31,8 +34,34 @@ def _text_hash(text):
     return hashlib.md5(text.encode("utf-8")).hexdigest()[:8]
 
 
+def target_audio(wp):
+    """Return the audio file to use for a waypoint's narration.
+
+    An existing file (custom wp['audio'], or a cached synthesis bound to the
+    current intro text) is returned as-is; otherwise this returns the cache
+    path that speak() should synthesize into.
+    """
+    custom = wp.get("audio", "")
+    if custom:
+        p = os.path.join(AUDIO_DIR, custom)
+        if os.path.isfile(p):
+            return p
+        if os.path.isfile(custom):
+            return custom
+    text = wp.get("intro", "").strip() or DEFAULT_INTRO
+    return audio_path(wp.get("id", 0), _text_hash(text))
+
+
+def _ffplay_env():
+    # Force ALSA output via SDL so playback goes to the default analog card
+    # (the Nvidia HDMI sink can otherwise be picked by mistake).
+    env = dict(os.environ)
+    env["SDL_AUDIODRIVER"] = "alsa"
+    return env
+
+
 async def synthesize(text, out_path):
-    """Synthesize text to mp3 using edge-tts (network required)."""
+    """Synthesize text to a complete mp3 file using edge-tts (network required)."""
     os.makedirs(os.path.dirname(out_path), exist_ok=True)
     communicate = edge_tts.Communicate(text, VOICE, rate=_RATE)
     await communicate.save(out_path)
@@ -40,30 +69,82 @@ async def synthesize(text, out_path):
     return out_path
 
 
-async def ensure_audio(wp):
-    """Return an audio file path for a waypoint, synthesizing if needed.
+async def _stream_play(communicate, out_path=None):
+    """Pipe edge-tts audio chunks into ffplay stdin as they arrive.
 
-    Priority: wp['audio'] (custom file) > cached intro_<id>_<hash>.mp3
-    (hash of the intro text, so edits re-synthesize) > synthesize intro text.
+    Playback starts on the first chunk; the full stream is also written to
+    out_path (if given) so the next play can hit the cache. A partial file is
+    removed if synthesis/playback is interrupted, so it is never mistaken for
+    a valid cache entry.
     """
-    # custom audio file (audio/ dir)
-    custom = wp.get("audio", "")
-    if custom:
-        p = os.path.join(AUDIO_DIR, custom)
-        if os.path.isfile(p):
-            return p
-        p = custom if os.path.isfile(custom) else None
-        if p:
-            return p
+    proc = await asyncio.create_subprocess_exec(
+        "ffplay", "-nodisp", "-autoexit", "-loglevel", "error", "-i", "pipe:0",
+        stdin=asyncio.subprocess.PIPE,
+        stdout=asyncio.subprocess.DEVNULL,
+        stderr=asyncio.subprocess.DEVNULL,
+        env=_ffplay_env(),
+    )
+    f = None
+    if out_path:
+        os.makedirs(os.path.dirname(out_path), exist_ok=True)
+        f = open(out_path, "wb")
+    complete = False
+    cancelled = False
+    try:
+        async for chunk in communicate.stream():
+            if chunk["type"] != "audio":
+                continue
+            data = chunk.get("data")
+            if not data:
+                continue
+            if f:
+                f.write(data)
+            if proc.stdin is not None:
+                proc.stdin.write(data)
+                await proc.stdin.drain()
+        complete = True
+    except asyncio.CancelledError:
+        cancelled = True
+        raise
+    except Exception as e:
+        log.warning("stream playback error: %s", e)
+    finally:
+        if f:
+            f.close()
+            f = None
+        # never leave a truncated file behind as a "cache hit"
+        if not complete and out_path and os.path.isfile(out_path):
+            try:
+                os.remove(out_path)
+            except OSError:
+                pass
+        if cancelled and proc.returncode is None:
+            proc.kill()  # stop buffered audio immediately on skip/stop
+        try:
+            if proc.stdin is not None and not proc.stdin.is_closing():
+                proc.stdin.close()
+        except Exception:
+            pass
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=15)
+        except Exception:
+            if proc.returncode is None:
+                proc.kill()
+    log.info("stream playback finished: %s", out_path)
 
-    # cached synthesized audio (hash-bound to the intro text)
-    text = wp.get("intro", "").strip() or DEFAULT_INTRO
-    cached = audio_path(wp.get("id", 0), _text_hash(text))
-    if os.path.isfile(cached):
-        return cached
 
-    # synthesize
-    return await synthesize(text, cached)
+async def speak(text, out_path=None):
+    """Play narration for text, streaming from edge-tts.
+
+    If out_path already exists it is played directly (instant, offline);
+    otherwise the text is synthesized and streamed chunk-by-chunk, and cached
+    to out_path for next time.
+    """
+    if out_path and os.path.isfile(out_path):
+        return await play(out_path)
+    communicate = edge_tts.Communicate(text, VOICE, rate=_RATE)
+    await _stream_play(communicate, out_path)
+    return out_path
 
 
 def duration_sec(path):
@@ -82,26 +163,30 @@ def duration_sec(path):
 async def play(path, on_done=None):
     """Play an audio file to the local sound card; call on_done when finished.
 
-    Returns the ffplay process; if playback fails, calls on_done immediately.
+    Returns None. If playback fails, calls on_done immediately. If the
+    surrounding task is cancelled (e.g. tour stopped), ffplay is killed so
+    playback stops immediately.
     """
     if not os.path.isfile(path):
         log.warning("audio file missing: %s", path)
         if on_done:
             on_done()
         return None
+    proc = None
     try:
-        # Force ALSA output via SDL so playback goes to the default analog card
-        # (the Nvidia HDMI sink can otherwise be picked by mistake).
-        env = dict(os.environ)
-        env["SDL_AUDIODRIVER"] = "alsa"
         proc = await asyncio.create_subprocess_exec(
             "ffplay", "-nodisp", "-autoexit", "-loglevel", "error", path,
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
-            env=env,
+            env=_ffplay_env(),
         )
         await proc.wait()
         log.info("playback finished: %s", path)
+    except asyncio.CancelledError:
+        if proc is not None and proc.returncode is None:
+            proc.kill()
+        log.info("playback cancelled: %s", path)
+        raise
     except Exception as e:
         log.warning("playback failed: %s", e)
     if on_done:

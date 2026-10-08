@@ -15,6 +15,7 @@ function connect() {
   const ws = new WebSocket(`${proto}://${location.host}/ws`);
   state.ws = ws;
   ws.onclose = () => setTimeout(connect, 2000);
+  ws.onopen = () => sendAi({ op: "models" });   // 刷新模型列表
   ws.onmessage = (ev) => {
     let m; try { m = JSON.parse(ev.data); } catch { return; }
     if (m.type !== "ai") return;
@@ -54,10 +55,23 @@ function handleAi(m) {
       state.streamingEl.textContent += (m.text || "");
       box.scrollTop = box.scrollHeight;
     }
+  } else if (m.op === "models") {
+    const sel = $("ai-model");
+    if (sel && Array.isArray(m.models)) {
+      const cur = sel.value;
+      sel.innerHTML = "";
+      m.models.forEach((n) => {
+        const o = document.createElement("option");
+        o.value = n; o.textContent = n;
+        sel.appendChild(o);
+      });
+      sel.value = (m.default && m.models.includes(m.default)) ? m.default : cur;
+      if (!sel.value && sel.options.length) sel.selectedIndex = 0;
+    }
   } else if (m.op === "started") {
     state.chatOpen = true;
     setUi(true);
-    addSys("模型已启动（gemma3:4b），可以开始对话。支持发送图片分析。");
+    addSys("模型已启动（" + (m.model || "ollama") + "），可以开始对话。支持发送图片分析。");
     $("ai-status").textContent = "对话中（输入 /bye 结束）";
   } else if (m.op === "ended") {
     state.chatOpen = false;
@@ -82,6 +96,7 @@ function addSys(text) {
 }
 
 function setUi(open) {
+  $("ai-model").disabled = open;
   $("btn-ai-start").disabled = open;
   $("btn-ai-end").disabled = !open;
   $("ai-input").disabled = !open;
@@ -90,9 +105,10 @@ function setUi(open) {
 
 // ---------------- controls ----------------
 $("btn-ai-start").addEventListener("click", () => {
-  addSys("正在启动 Ollama 模型（gemma3:4b）…首次拉取需要数分钟，请耐心等待。");
+  const model = ($("ai-model") && $("ai-model").value) || "";
+  addSys("正在启动 Ollama 模型（" + (model || "默认") + "）…");
   $("ai-status").textContent = "启动中…";
-  sendAi({ op: "start", model: "gemma3:4b" });
+  sendAi({ op: "start", model: model });
 });
 
 $("btn-ai-end").addEventListener("click", () => {

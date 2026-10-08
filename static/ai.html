@@ -45,13 +45,14 @@
 
   <!-- 模块1：基础 AI 对话 -->
   <section class="card">
-    <h2>💬 基础 AI 对话 <span class="dev-tag">Ollama · gemma3:4b</span></h2>
-    <div style="display:flex; gap:8px;">
+    <h2>💬 基础 AI 对话 <span class="dev-tag">Ollama · 本地多模型</span></h2>
+    <div style="display:flex; gap:8px; align-items:center;">
+      <select id="ai-model" class="btn" style="max-width:230px;" title="选择模型"></select>
       <button class="btn primary" id="btn-ai-start">▶ 开始对话</button>
       <button class="btn danger" id="btn-ai-end" disabled>⏹ 结束对话</button>
     </div>
     <div class="chat-box" id="chat-box">
-      <div class="sys">点击「开始对话」启动本地 Ollama 模型（首次会自动拉取 gemma3:4b，需要等待下载）。输入 /bye 或点「结束对话」退出。</div>
+      <div class="sys">选择模型后点击「开始对话」启动本地 Ollama。输入 /bye 或点「结束对话」退出。</div>
     </div>
     <div class="input-row">
       <button class="btn" id="btn-ai-photo" title="拍照分析" disabled>📷</button>

@@ -223,7 +223,6 @@ function updateStatus() {
   $("st-pos").textContent = `${state.pos.x.toFixed(2)}, ${state.pos.y.toFixed(2)}`;
   $("st-yaw").textContent = `${(state.yaw * 180 / Math.PI).toFixed(1)}°`;
   const st = state.tour;
-  const introRow = $("intro-row");
   const mapState = {
     turning: "🔄 转向中", acting: "🤖 动作中", introducing: "🔊 介绍中", traveling: "🚶 前往"
   };
@@ -233,16 +232,13 @@ function updateStatus() {
     $("st-tour").textContent = `${phase}：${cur.name || "展品"} ${st.state === "introducing" ? "→ " + st.intro : ""}`;
     $("tour-status").textContent = `${phase} ${cur.name || "展品"}` +
       (st.intro ? `：${st.intro}` : "");
-    introRow.style.display = "flex";
   } else if (st.active) {
     const cur = st.current || {};
     $("st-tour").textContent = `${phase} 第 ${st.idx + 1}/${st.total} 点 → ${cur.name || ""}`;
     $("tour-status").textContent = `${phase} ${st.idx + 1}/${st.total}（${cur.name || ""}）`;
-    introRow.style.display = "none";
   } else {
     $("st-tour").textContent = "未导览";
     $("tour-status").textContent = "未开始";
-    introRow.style.display = "none";
   }
 }
 
@@ -587,10 +583,6 @@ $("btn-tour-clear").addEventListener("click", () => {
 
 $("btn-tour-stop").addEventListener("click", () => {
   send({ type: "tour", op: "stop" });
-});
-
-$("btn-skip-intro").addEventListener("click", () => {
-  send({ type: "tour", op: "skip" });
 });
 
 // ---------------- SCAN-Planner system control ----------------

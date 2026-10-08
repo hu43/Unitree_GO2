@@ -85,7 +85,7 @@ colcon build --symlink-install --cmake-args -DCMAKE_BUILD_TYPE=Release \
 - [SCAN-Planner](https://github.com/wuyi2121/SCAN-Planner)（Han Zheng 等，arXiv:2606.19555）及其 ROS2 社区移植
 - [unitree_ros2](https://github.com/unitreerobotics/unitree_ros2) / [unitree_sdk2_python](https://github.com/unitreerobotics/unitree_sdk2_python)
 - [Ollama](https://ollama.com) / Google gemma3:4b（本地多模态大模型）
-- 亚博智能（largemodel 多模态教程项目）
+- [亚博智能](https://www.yahboom.com/study/Orin-Nano-SUPER) / 密码:lguu（largemodel 多模态教程项目）
 
 ## ⚖️ License
 

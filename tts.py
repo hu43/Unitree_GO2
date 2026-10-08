@@ -2,17 +2,21 @@
 """TTS + audio playback for the exhibition tour.
 
 - edge-tts (Microsoft online neural voices) for Chinese narration synthesis
-- ffplay for playback to the local sound card
-- Narration is streamed: edge-tts audio chunks are piped straight into ffplay
+- ffmpeg (ALSA output) for playback to the local sound card
+- Narration is streamed: edge-tts audio chunks are piped straight into ffmpeg
   stdin, so playback starts as soon as the first chunk arrives instead of
   waiting for the whole clip. The complete mp3 is still cached under
   <web>/audio/intro_<id>.mp3 so later plays are instant and offline.
+- The ALSA playback device is auto-detected: a capture-only USB mic can
+  enumerate as card 0, and ALSA's default (card 0) would then have no playback
+  device and silence the speaker.
 """
 
 import asyncio
 import hashlib
 import logging
 import os
+import re
 import subprocess
 
 import edge_tts
@@ -52,12 +56,40 @@ def target_audio(wp):
     return audio_path(wp.get("id", 0), _text_hash(text))
 
 
-def _ffplay_env():
-    # Force ALSA output via SDL so playback goes to the default analog card
-    # (the Nvidia HDMI sink can otherwise be picked by mistake).
-    env = dict(os.environ)
-    env["SDL_AUDIODRIVER"] = "alsa"
-    return env
+def _speaker_device():
+    """ALSA playback device for the exhibit speaker.
+
+    A capture-only USB microphone can enumerate as card 0, in which case
+    ALSA's default (card 0) exposes no playback PCM and playback fails. Pick
+    the first USB-Audio card that actually has a playback device. Override
+    with the GO2_SPEAKER_DEV env var (an ALSA device string) if the auto-pick
+    is wrong for a given setup.
+    """
+    override = os.environ.get("GO2_SPEAKER_DEV")
+    if override:
+        return override
+    try:
+        with open("/proc/asound/cards", encoding="utf-8") as f:
+            for line in f:
+                m = re.match(r"\s*(\d+)\s*\[([^\]]+)\]\s*:\s*(\S+)\s*-", line)
+                if not m:
+                    continue
+                idx, card_id, driver = int(m.group(1)), m.group(2).strip(), m.group(3)
+                if driver == "USB-Audio" and os.path.exists("/dev/snd/pcmC%dD0p" % idx):
+                    return "plughw:CARD=%s,DEV=0" % card_id
+    except Exception as e:
+        log.warning("speaker device detection failed: %s", e)
+    return "default"
+
+
+def _ffmpeg_cmd(source):
+    """ffmpeg argv that decodes `source` (a file path or 'pipe:0') to the
+    speaker. ffmpeg's ALSA output takes an explicit device, unlike ffplay/SDL
+    which ignores SDL_AUDIODEV, so the speaker card can be pinned down."""
+    return [
+        "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin",
+        "-i", source, "-f", "alsa", _speaker_device(),
+    ]
 
 
 async def synthesize(text, out_path):
@@ -70,7 +102,7 @@ async def synthesize(text, out_path):
 
 
 async def _stream_play(communicate, out_path=None):
-    """Pipe edge-tts audio chunks into ffplay stdin as they arrive.
+    """Pipe edge-tts audio chunks into ffmpeg stdin as they arrive.
 
     Playback starts on the first chunk; the full stream is also written to
     out_path (if given) so the next play can hit the cache. A partial file is
@@ -78,11 +110,10 @@ async def _stream_play(communicate, out_path=None):
     a valid cache entry.
     """
     proc = await asyncio.create_subprocess_exec(
-        "ffplay", "-nodisp", "-autoexit", "-loglevel", "error", "-i", "pipe:0",
+        *_ffmpeg_cmd("pipe:0"),
         stdin=asyncio.subprocess.PIPE,
         stdout=asyncio.subprocess.DEVNULL,
         stderr=asyncio.subprocess.DEVNULL,
-        env=_ffplay_env(),
     )
     f = None
     if out_path:
@@ -164,7 +195,7 @@ async def play(path, on_done=None):
     """Play an audio file to the local sound card; call on_done when finished.
 
     Returns None. If playback fails, calls on_done immediately. If the
-    surrounding task is cancelled (e.g. tour stopped), ffplay is killed so
+    surrounding task is cancelled (e.g. tour stopped), the player is killed so
     playback stops immediately.
     """
     if not os.path.isfile(path):
@@ -175,10 +206,10 @@ async def play(path, on_done=None):
     proc = None
     try:
         proc = await asyncio.create_subprocess_exec(
-            "ffplay", "-nodisp", "-autoexit", "-loglevel", "error", path,
+            *_ffmpeg_cmd(path),
+            stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
-            env=_ffplay_env(),
         )
         await proc.wait()
         log.info("playback finished: %s", path)

@@ -179,8 +179,11 @@ def ensure_ap_profile(net):
     if rc != 0:
         log("failed to create AP profile: %s" % err)
         return None
+    # do NOT autoconnect by default: the Go2 hotspot may be off, and we do not
+    # want the Jetson to fight for it on every boot. Flip this to yes (and set
+    # a priority) once the hotspot is confirmed to work.
     run(["nmcli", "con", "modify", profile,
-         "connection.autoconnect-priority", "100"], timeout=15)
+         "connection.autoconnect", "no"], timeout=15)
     return profile
 
 

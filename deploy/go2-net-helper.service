@@ -1,0 +1,6 @@
+[Unit]
+Description=Go2 network control helper (process queue + refresh status)
+
+[Service]
+Type=oneshot
+ExecStart=/usr/local/bin/go2-net-helper.py tick

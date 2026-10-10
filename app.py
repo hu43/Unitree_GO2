@@ -39,14 +39,6 @@ CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
 STATIC_DIR = os.path.join(BASE_DIR, "static")
 UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
 
-# Network control spool: the web app runs inside Docker (host net, but no
-# nmcli/dbus), so it drops requests here for a host-side root helper
-# (deploy/go2-net-helper.py) to execute, and reads the helper's status file.
-NET_DIR = os.path.join(os.path.dirname(BASE_DIR), "net-ctl")
-NET_QUEUE = os.path.join(NET_DIR, "queue")
-NET_RESULTS = os.path.join(NET_DIR, "results")
-NET_STATUS = os.path.join(NET_DIR, "status.json")
-
 log = logging.getLogger("go2web")
 
 DEFAULT_CONFIG = {
@@ -63,14 +55,6 @@ DEFAULT_CONFIG = {
     "push_hz": 10,
     "reach_threshold": 0.4,
     "max_speed": 0.5,
-    "net": {
-        "mode": "ap",               # "ap" (机器狗热点直连) | "wifi" (外部 WiFi)
-        "ap_ssid": "Go2_Asano",     # Go2 hotspot SSID
-        "ap_psk": "",               # Go2 hotspot password (kept host-side if empty)
-        "ap_profile": "Go2-AP",     # NetworkManager profile names
-        "wifi_profile": "go2-wifi-ext",
-        "robot_ip_eth": "192.168.123.161",
-    },
     "waypoints": [],
 }
 
@@ -81,8 +65,6 @@ def load_config():
             data = json.load(f)
         merged = dict(DEFAULT_CONFIG)
         merged.update(data)
-        # nested dicts are not deep-merged by dict.update
-        merged["net"] = {**DEFAULT_CONFIG["net"], **data.get("net", {})}
         return merged
     return dict(DEFAULT_CONFIG)
 
@@ -359,8 +341,6 @@ class WebApp:
         self.ai_started = False
         self.ai_busy = False
         self.ai_model = self.AI_MODEL   # 当前会话模型，可由前端指定
-        self._net_status_data = {}      # cached net-ctl/status.json
-        self._net_status_ts = 0.0
 
     async def broadcast_state(self):
         """Push the current map + robot state to all clients."""
@@ -374,7 +354,6 @@ class WebApp:
             "odom_stamp": snap["odom_stamp"],
             "tour": self.tour.status(),
             "control_mode": self.control_mode,
-            "net": self._net_state(),
         }
         if self.clients:
             data = json.dumps(msg)
@@ -466,9 +445,6 @@ class WebApp:
 
         if mtype == "config":
             return self._handle_config(msg)
-
-        if mtype == "net":
-            return self._handle_net(msg, websocket)
 
         return {"ok": False, "error": f"unknown type {mtype}"}
 
@@ -894,103 +870,6 @@ class WebApp:
             return {"ok": True, key: self.cfg[key]}
         return {"ok": False, "error": f"unknown config key {key}"}
 
-    # ---- network config (delegated to the host-side helper via a spool dir) ----
-    def _net_status_cache(self):
-        now = time.time()
-        if now - self._net_status_ts >= 2.0:
-            try:
-                with open(NET_STATUS, "r", encoding="utf-8") as f:
-                    self._net_status_data = json.load(f)
-            except Exception:
-                self._net_status_data = {}
-            self._net_status_ts = now
-        return self._net_status_data
-
-    def _net_state(self):
-        st = self._net_status_cache()
-        return {
-            "mode": st.get("mode") or self.cfg.get("net", {}).get("mode", "ap"),
-            "robot_ip": st.get("robot_ip", ""),
-            "jetson_ip": st.get("jetson_ip", ""),
-            "wlan0_ssid": st.get("wlan0_ssid", ""),
-            "wlan0_state": st.get("wlan0_state", ""),
-        }
-
-    def _net_enqueue(self, req):
-        """Write a request for the host-side helper; returns a nonce."""
-        os.makedirs(NET_QUEUE, exist_ok=True)
-        nonce = "%d-%d" % (int(time.time() * 1000), os.getpid())
-        payload = dict(req, nonce=nonce, ts=time.time())
-        tmp = os.path.join(NET_QUEUE, nonce + ".tmp")
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(payload, f, ensure_ascii=False)
-        os.replace(tmp, os.path.join(NET_QUEUE, nonce + ".json"))
-        return nonce
-
-    async def _net_push(self, payload, client):
-        if client is None:
-            return
-        try:
-            await client.send(json.dumps({"type": "net", **payload}))
-        except Exception:
-            pass
-
-    async def _net_push_status(self, client):
-        st = dict(self._net_status_cache())
-        st.setdefault("mode", self.cfg.get("net", {}).get("mode", "ap"))
-        await self._net_push({"op": "status", **st}, client)
-
-    async def _net_await_result(self, nonce, client, op):
-        """Poll for the helper's result file and push it to the client."""
-        path = os.path.join(NET_RESULTS, nonce + ".json")
-        res = None
-        for _ in range(150):  # up to ~30s
-            await asyncio.sleep(0.2)
-            try:
-                with open(path, "r", encoding="utf-8") as f:
-                    res = json.load(f)
-                break
-            except Exception:
-                continue
-        if res is None:
-            await self._net_push(
-                {"op": op, "ok": False, "error": "宿主机网络代理无响应（超时）"}, client)
-            return
-        await self._net_push({"op": op, **res}, client)
-        await asyncio.sleep(1.0)
-        self._net_status_ts = 0.0
-        await self._net_push_status(client)
-
-    def _handle_net(self, msg, websocket):
-        """Network mode control: status / scan / set_mode (ap|wifi)."""
-        op = msg.get("op")
-        if op == "status":
-            asyncio.ensure_future(self._net_push_status(websocket))
-            return {"ok": True}
-        if op == "scan":
-            nonce = self._net_enqueue({"op": "scan"})
-            asyncio.ensure_future(self._net_await_result(nonce, websocket, "scan_result"))
-            return {"ok": True, "msg": "扫描中…"}
-        if op == "set_mode":
-            mode = msg.get("mode")
-            if mode not in ("ap", "wifi"):
-                return {"ok": False, "error": f"unknown mode {mode!r}"}
-            req = {"op": "set_mode", "mode": mode}
-            if mode == "wifi":
-                ssid = str(msg.get("ssid", "")).strip()
-                pwd = str(msg.get("password", ""))
-                if not ssid or len(ssid) > 32 or any(ord(c) < 32 for c in ssid):
-                    return {"ok": False, "error": "SSID 无效"}
-                if len(pwd) > 63:
-                    return {"ok": False, "error": "密码过长"}
-                req.update(ssid=ssid, password=pwd)
-            self.cfg.setdefault("net", {})["mode"] = mode
-            save_config(self.cfg)
-            nonce = self._net_enqueue(req)
-            asyncio.ensure_future(self._net_await_result(nonce, websocket, "switch_result"))
-            return {"ok": True, "msg": "正在切换网络…"}
-        return {"ok": False, "error": f"unknown net op {op}"}
-
 
 # --------------------------------------------------------------------------
 # HTTP static server + entry
@@ -1010,16 +889,13 @@ async def http_handler(connection, request):
     path = request.path
     if path in ("/ws", "/ws/"):
         return None  # let the WebSocket handshake proceed
-    # route: "/" -> main panel, "/console" -> tour console, "/ai" -> AI panel,
-    #        "/network" -> network config
+    # route: "/" -> main panel, "/console" -> tour console, "/ai" -> AI panel
     if path in ("/", ""):
         path = "/index.html"
     elif path in ("/console", "/console/"):
         path = "/console.html"
     elif path in ("/ai", "/ai/"):
         path = "/ai.html"
-    elif path in ("/network", "/network/"):
-        path = "/network.html"
     # basic path traversal guard
     full = os.path.normpath(os.path.join(STATIC_DIR, path.lstrip("/")))
     if not full.startswith(STATIC_DIR) or not os.path.isfile(full):
@@ -1045,7 +921,6 @@ async def ws_handler(websocket):
                 "reach_threshold": app.cfg.get("reach_threshold", 0.4),
             },
             "waypoints": app.cfg.get("waypoints", []),
-            "net": app._net_state(),
         }))
         async for raw in websocket:
             resp = app.handle_message(raw, websocket)

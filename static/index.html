@@ -34,11 +34,6 @@
     box-shadow: 0 6px 24px rgba(74,158,255,.35);
   }
   .big-btn:active { transform: scale(.98); }
-  .big-btn.net-btn {
-    background: linear-gradient(135deg, #2f7ad0, #1f568f);
-    box-shadow: 0 6px 24px rgba(47,122,208,.3);
-    font-size: 17px; padding: 15px;
-  }
   .sec-title { width: 100%; color: var(--accent); font-size: 15px; font-weight: 600; text-align: left; margin-top: 4px; }
   .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; width: 100%; }
   .grid-2 a {
@@ -62,13 +57,9 @@
     <div class="row"><span>机器人位置</span><b id="hm-pos">-</b></div>
     <div class="row"><span>朝向</span><b id="hm-yaw">-</b></div>
     <div class="row"><span>地图点</span><b id="hm-map">0</b></div>
-    <div class="row"><span>机器狗 IP</span><b id="hm-robot-ip">-</b></div>
-    <div class="row"><span>本机 IP</span><b id="hm-jetson-ip">-</b></div>
-    <div class="row"><span>连接方式</span><b id="hm-net-mode">-</b></div>
   </div>
 
   <button class="big-btn" onclick="location.href='/console'">🚶 进入展厅导览控制台</button>
-  <button class="big-btn net-btn" onclick="location.href='/network'">🌐 网络设置</button>
 
   <div class="sec-title">功能入口</div>
   <div class="grid-2">
@@ -76,7 +67,6 @@
     <a href="/console">🗺️ 地图与导航</a>
     <a href="/console">🕹️ 运动控制</a>
     <a href="/ai">🤖 AI 控制</a>
-    <a href="/network">🌐 网络设置</a>
   </div>
 
   <div class="footer">SCAN-Planner · Go2 X · ROS2 Humble</div>
@@ -100,11 +90,6 @@ function connect() {
       $("hm-pos").textContent = `${m.pos[0].toFixed(2)}, ${m.pos[1].toFixed(2)}`;
       $("hm-yaw").textContent = `${(m.yaw * 180 / Math.PI).toFixed(1)}°`;
       $("hm-map").textContent = m.map.length;
-      if (m.net) {
-        $("hm-robot-ip").textContent = m.net.robot_ip || "-";
-        $("hm-jetson-ip").textContent = m.net.jetson_ip || "-";
-        $("hm-net-mode").textContent = m.net.mode === "ap" ? "机器狗AP直连" : "WiFi";
-      }
     }
   };
 }

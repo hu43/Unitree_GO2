@@ -18,6 +18,7 @@ import math
 import os
 import signal
 import subprocess
+import sys
 import time
 import urllib.request
 
@@ -72,6 +73,20 @@ def load_config():
 def save_config(cfg):
     with open(CONFIG_PATH, "w", encoding="utf-8") as f:
         json.dump(cfg, f, ensure_ascii=False, indent=2)
+
+
+def _reexec():
+    """Replace this process with a fresh app.py (same env, same PID).
+
+    The rclpy/CycloneDDS participant can come up broken (e.g. the app gets no
+    odom while a fresh node sees it at full rate); re-exec re-initialises it
+    without disturbing the robot link or SCAN-Planner.
+    """
+    try:
+        os.execv(sys.executable, [sys.executable, os.path.abspath(__file__)])
+    except Exception as e:
+        log.error("re-exec failed: %s", e)
+        os._exit(1)  # let the host watchdog respawn us
 
 
 # --------------------------------------------------------------------------
@@ -445,6 +460,9 @@ class WebApp:
 
         if mtype == "config":
             return self._handle_config(msg)
+
+        if mtype == "restart":
+            return self._handle_restart()
 
         return {"ok": False, "error": f"unknown type {mtype}"}
 
@@ -869,6 +887,12 @@ class WebApp:
             save_config(self.cfg)
             return {"ok": True, key: self.cfg[key]}
         return {"ok": False, "error": f"unknown config key {key}"}
+
+    def _handle_restart(self):
+        """Restart this process in place (re-initialises the ROS/DDS bridge)."""
+        log.warning("restart requested via web UI")
+        asyncio.get_event_loop().call_later(1.0, _reexec)
+        return {"ok": True, "msg": "正在重启…"}
 
 
 # --------------------------------------------------------------------------

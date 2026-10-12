@@ -36,10 +36,10 @@
   .big-btn:active { transform: scale(.98); }
   .sec-title { width: 100%; color: var(--accent); font-size: 15px; font-weight: 600; text-align: left; margin-top: 4px; }
   .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; width: 100%; }
-  .grid-2 a {
-    display: block; text-align: center; padding: 14px 8px; border-radius: 10px;
+  .grid-2 a, .grid-2 .grid-btn {
+    display: block; width: 100%; text-align: center; padding: 14px 8px; border-radius: 10px;
     background: var(--card2); border: 1px solid #33415e; color: var(--fg);
-    text-decoration: none; font-size: 14px;
+    text-decoration: none; font-size: 14px; font-family: inherit; cursor: pointer;
   }
   .footer { color: var(--muted); font-size: 12px; margin-top: 8px; }
 </style>
@@ -63,7 +63,7 @@
 
   <div class="sec-title">功能入口</div>
   <div class="grid-2">
-    <a href="/console">🎛️ 导览控制台</a>
+    <button class="grid-btn" id="btn-restart">🔄 重启 App</button>
     <a href="/console">🗺️ 地图与导航</a>
     <a href="/console">🕹️ 运动控制</a>
     <a href="/ai">🤖 AI 控制</a>
@@ -75,9 +75,10 @@
 <script>
 // main panel: show robot status via WebSocket (read-only dashboard)
 const $ = (id) => document.getElementById(id);
+let ws = null;
 function connect() {
   const proto = location.protocol === "https:" ? "wss" : "ws";
-  const ws = new WebSocket(`${proto}://${location.host}/ws`);
+  ws = new WebSocket(`${proto}://${location.host}/ws`);
   ws.onopen = () => { $("hm-conn").textContent = "● 已连接"; $("hm-conn").className = ""; };
   ws.onclose = () => {
     $("hm-conn").textContent = "● 未连接"; $("hm-conn").className = "bad";
@@ -93,6 +94,17 @@ function connect() {
     }
   };
 }
+
+// restart the web app (re-initialises its ROS/DDS connection)
+$("btn-restart").addEventListener("click", () => {
+  if (!confirm("重启 App？\n\n页面会短暂断开，几秒后自动恢复。")) return;
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    ws.send(JSON.stringify({ type: "restart" }));
+  }
+  $("hm-conn").textContent = "● 正在重启…";
+  $("hm-conn").className = "";
+});
+
 connect();
 </script>
 </body>

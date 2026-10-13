@@ -756,8 +756,23 @@ class WebApp:
 
             async def _preview():
                 try:
-                    path = os.path.join(tts.AUDIO_DIR, f"preview_{int(time.time())}.mp3")
-                    await tts.speak(text, path)  # streamed, cached to path
+                    # Prefer the waypoint's own cache (the same file the tour
+                    # plays) so preview works offline; only synthesize when the
+                    # text has no cached audio yet.
+                    path = tts.audio_path(wp.get("id", 0), tts._text_hash(text))
+                    if os.path.isfile(path):
+                        await tts.play(path)
+                        return
+                    if await tts.speak(text, path):
+                        return
+                    # online TTS unavailable -> fall back to the waypoint's own
+                    # cached narration (its saved intro) if there is one
+                    fallback = tts.target_audio(wp)
+                    if fallback != path and os.path.isfile(fallback):
+                        log.warning("preview: TTS unavailable, playing cached %s", fallback)
+                        await tts.play(fallback)
+                    else:
+                        log.warning("preview: TTS unavailable and no cache for waypoint %s", wid)
                 except Exception as e:
                     log.warning("preview error: %s", e)
             asyncio.create_task(_preview())

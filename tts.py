@@ -182,20 +182,23 @@ async def speak(text, out_path=None):
     to out_path for next time. Synthesis is retried a few times because the
     online endpoint intermittently rejects requests (HTTP 403), which used to
     cut the narration short and let the tour move on silently.
+
+    Returns True if audio was played, False if synthesis failed.
     """
     if out_path and os.path.isfile(out_path):
-        return await play(out_path)
+        await play(out_path)
+        return True
     for attempt in range(1, TTS_ATTEMPTS + 1):
         communicate = edge_tts.Communicate(text, VOICE, rate=_RATE)
         if await _stream_play(communicate, out_path):
-            return out_path
+            return True
         if attempt < TTS_ATTEMPTS:
             log.warning("TTS attempt %d/%d failed (%d chars); retrying",
                         attempt, TTS_ATTEMPTS, len(text))
             await asyncio.sleep(1.5 * attempt)
     log.error("TTS synthesis failed after %d attempts (%d chars) -- narration skipped",
               TTS_ATTEMPTS, len(text))
-    return out_path
+    return False
 
 
 def duration_sec(path):

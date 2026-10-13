@@ -26,6 +26,7 @@ log = logging.getLogger("go2web.tts")
 AUDIO_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "audio")
 VOICE = "zh-CN-XiaoxiaoNeural"  # natural female Mandarin voice
 _RATE = "+0%"                    # speaking rate (edge-tts syntax: +0% normal)
+TTS_ATTEMPTS = 3                 # the online endpoint intermittently 403s
 
 DEFAULT_INTRO = "欢迎参观，这里是本展区。"
 
@@ -104,10 +105,10 @@ async def synthesize(text, out_path):
 async def _stream_play(communicate, out_path=None):
     """Pipe edge-tts audio chunks into ffmpeg stdin as they arrive.
 
-    Playback starts on the first chunk; the full stream is also written to
-    out_path (if given) so the next play can hit the cache. A partial file is
-    removed if synthesis/playback is interrupted, so it is never mistaken for
-    a valid cache entry.
+    Returns True if the whole stream played, False if synthesis/playback failed
+    part-way. Playback starts on the first chunk; the full stream is also
+    written to out_path (if given) so the next play can hit the cache. A
+    partial file is removed so it is never mistaken for a valid cache entry.
     """
     proc = await asyncio.create_subprocess_exec(
         *_ffmpeg_cmd("pipe:0"),
@@ -121,6 +122,7 @@ async def _stream_play(communicate, out_path=None):
         f = open(out_path, "wb")
     complete = False
     cancelled = False
+    written = 0
     try:
         async for chunk in communicate.stream():
             if chunk["type"] != "audio":
@@ -128,6 +130,7 @@ async def _stream_play(communicate, out_path=None):
             data = chunk.get("data")
             if not data:
                 continue
+            written += len(data)
             if f:
                 f.write(data)
             if proc.stdin is not None:
@@ -138,7 +141,7 @@ async def _stream_play(communicate, out_path=None):
         cancelled = True
         raise
     except Exception as e:
-        log.warning("stream playback error: %s", e)
+        log.warning("stream playback error after %d bytes: %s", written, e)
     finally:
         if f:
             f.close()
@@ -156,12 +159,19 @@ async def _stream_play(communicate, out_path=None):
                 proc.stdin.close()
         except Exception:
             pass
+        # ffmpeg still has to play out whatever it buffered. Bound the wait by
+        # the audio we streamed (mp3 @48 kbps = 6000 B/s) plus a margin: a flat
+        # short timeout would kill long narrations mid-sentence.
+        budget = written / 6000.0 + 60.0
         try:
-            await asyncio.wait_for(proc.wait(), timeout=15)
+            await asyncio.wait_for(proc.wait(), timeout=budget)
         except Exception:
+            log.warning("playback did not finish within %.0fs; killing", budget)
             if proc.returncode is None:
                 proc.kill()
-    log.info("stream playback finished: %s", out_path)
+    log.info("stream playback finished: %s (%d bytes, complete=%s)",
+             out_path, written, complete)
+    return complete
 
 
 async def speak(text, out_path=None):
@@ -169,12 +179,22 @@ async def speak(text, out_path=None):
 
     If out_path already exists it is played directly (instant, offline);
     otherwise the text is synthesized and streamed chunk-by-chunk, and cached
-    to out_path for next time.
+    to out_path for next time. Synthesis is retried a few times because the
+    online endpoint intermittently rejects requests (HTTP 403), which used to
+    cut the narration short and let the tour move on silently.
     """
     if out_path and os.path.isfile(out_path):
         return await play(out_path)
-    communicate = edge_tts.Communicate(text, VOICE, rate=_RATE)
-    await _stream_play(communicate, out_path)
+    for attempt in range(1, TTS_ATTEMPTS + 1):
+        communicate = edge_tts.Communicate(text, VOICE, rate=_RATE)
+        if await _stream_play(communicate, out_path):
+            return out_path
+        if attempt < TTS_ATTEMPTS:
+            log.warning("TTS attempt %d/%d failed (%d chars); retrying",
+                        attempt, TTS_ATTEMPTS, len(text))
+            await asyncio.sleep(1.5 * attempt)
+    log.error("TTS synthesis failed after %d attempts (%d chars) -- narration skipped",
+              TTS_ATTEMPTS, len(text))
     return out_path
 
 

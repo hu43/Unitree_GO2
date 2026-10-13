@@ -9,6 +9,8 @@ SCAN-Planner stack over standard ROS2 topics.
 """
 
 import math
+import os
+import sys
 import threading
 
 import rclpy
@@ -254,8 +256,20 @@ def start_bridge(cfg):
         executor.add_node(bridge)
         try:
             executor.spin()
-        except Exception as e:  # pragma: no cover
+        except BaseException as e:  # pragma: no cover
             bridge.get_logger().error(f"spin error: {e}")
+            # rclpy/CycloneDDS 崩坏时解释器内存已被写坏（表现为
+            # "XXX lineno: -38, opcode: 0" / "SystemError: unknown opcode"），
+            # 进程随后必死。与其等 systemd 看门狗 2 分钟后才发现，不如立刻
+            # 原地 re-exec 重建 DDS participant —— 只断约 2 秒。
+            # 用 os.write 而非 log.*，避免另一线程正持 logging 锁时 execv 死锁。
+            try:
+                os.write(2, ("go2web: ROS spin died (%r), re-exec to rebuild DDS\n"
+                             % (e,)).encode())
+            except Exception:
+                pass
+            os.execv(sys.executable,
+                     [sys.executable, "/home/unitree/hu/go2/web/app.py"])
         finally:
             executor.shutdown()
 

@@ -10,3 +10,10 @@ audio/
 # Editor
 .vscode/
 .idea/
+
+# 上传的图片/视频（运行时数据）
+uploads/
+
+# 手工备份：改文件前的快照，不入库
+*.bak-*
+audio.bak-*/

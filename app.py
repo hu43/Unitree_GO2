@@ -10,13 +10,24 @@ through ros_bridge.RosBridge over standard ROS2 topics.
 """
 
 import asyncio
+import base64
+import faulthandler
 import json
 import logging
 import math
 import os
 import signal
 import subprocess
+import sys
 import time
+import urllib.request
+
+import aiohttp
+
+# 诊断：每 20s 把所有线程栈 dump 到 threads.log（定位阻塞用）
+_fh = open("/home/unitree/hu/go2/threads.log", "w")
+faulthandler.enable()  # 段错误/abort 等致命信号转储到 stderr -> web.log
+faulthandler.dump_traceback_later(20, repeat=True, file=_fh)
 
 import websockets
 from websockets.datastructures import Headers
@@ -28,6 +39,7 @@ import tts
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 CONFIG_PATH = os.path.join(BASE_DIR, "config.json")
 STATIC_DIR = os.path.join(BASE_DIR, "static")
+UPLOAD_DIR = os.path.join(BASE_DIR, "uploads")
 
 log = logging.getLogger("go2web")
 
@@ -64,6 +76,20 @@ def save_config(cfg):
         json.dump(cfg, f, ensure_ascii=False, indent=2)
 
 
+def _reexec():
+    """Replace this process with a fresh app.py (same env, same PID).
+
+    The rclpy/CycloneDDS participant can come up broken (e.g. the app gets no
+    odom while a fresh node sees it at full rate); re-exec re-initialises it
+    without disturbing the robot link or SCAN-Planner.
+    """
+    try:
+        os.execv(sys.executable, [sys.executable, os.path.abspath(__file__)])
+    except Exception as e:
+        log.error("re-exec failed: %s", e)
+        os._exit(1)  # let the host watchdog respawn us
+
+
 # --------------------------------------------------------------------------
 # Tour (waypoint-guided autonomous navigation + turn + action + narration)
 # --------------------------------------------------------------------------
@@ -83,6 +109,7 @@ class Tour:
         self.intro_wp = None
         self._stage_task = None  # current async stage (turn / act+intro)
         self._turn_task = None
+        self._intro_task = None  # current narration playback task
         self._yaw_tolerance = math.radians(4.0)
         self._yaw_k = 1.0        # proportional turn gain
         self._max_vyaw = 0.6     # max turn rate
@@ -101,11 +128,12 @@ class Tour:
         self.active = False
         self.state = "idle"
         self.intro_text = ""
-        for task in (self._stage_task, self._turn_task):
+        for task in (self._stage_task, self._turn_task, self._intro_task):
             if task:
                 task.cancel()
         self._stage_task = None
         self._turn_task = None
+        self._intro_task = None
         # Halt the robot so the joystick can take over cleanly, then publish a
         # goal at the current position so SCAN-Planner finishes any running
         # trajectory and returns to WAIT_TARGET (releasing /cmd_vel).
@@ -231,6 +259,7 @@ class Tour:
             _, action_dur = self.bridge.send_action(action_name)
             # start intro playback concurrently
             intro_task = asyncio.create_task(self._play_intro(wp))
+            self._intro_task = intro_task
             tasks = [intro_task]
             if action_dur > 0:
                 # wait for both: action duration and intro playback
@@ -247,6 +276,11 @@ class Tour:
         except Exception as e:
             log.warning("act+intro error: %s", e)
         finally:
+            # stop narration immediately if it is still playing (tour stopped /
+            # stage cancelled); tts kills ffplay on cancellation
+            if self._intro_task and not self._intro_task.done():
+                self._intro_task.cancel()
+            self._intro_task = None
             # resume the bridge so the next leg of the tour can be controlled
             try:
                 self.bridge.send_pause(False)
@@ -257,8 +291,10 @@ class Tour:
 
     async def _play_intro(self, wp):
         try:
-            audio = await tts.ensure_audio(wp)
-            await tts.play(audio)
+            # Streaming TTS: speak() pipes edge-tts chunks straight into ffplay,
+            # so narration starts as soon as the first chunk arrives.
+            text = wp.get("intro", "").strip() or tts.DEFAULT_INTRO
+            await tts.speak(text, tts.target_audio(wp))
         except asyncio.CancelledError:
             pass
         except Exception as e:
@@ -299,9 +335,11 @@ class Tour:
 # --------------------------------------------------------------------------
 # SCAN-Planner launch command (real-robot, 2D Nav Goal mode, bridge on)
 SCAN_LAUNCH_CMD = (
-    "cd ~/unitree_sdk2-main/example/user/SCAN-Planner && "
-    "source setup_scan_planner.sh && "
-    "ros2 launch scan_planner real_robot.launch.py navi_mode:=1 bridge_enable:=true"
+    "source /opt/ros/humble/setup.bash && "
+    "source /home/unitree/hu/go2/install/setup.bash && "
+    "export RMW_IMPLEMENTATION=rmw_cyclonedds_cpp "
+    "CYCLONEDDS_URI=file:///home/unitree/hu/go2/cyclonedds_eth0.xml && "
+    "ros2 launch scan_planner real_robot.launch.py navi_mode:=1 bridge_enable:=true rviz:=false"
 )
 SCAN_LOG_PATH = os.path.join(BASE_DIR, "log", "scan_planner.log")
 
@@ -314,6 +352,11 @@ class WebApp:
         self.clients = set()
         self.control_mode = "joystick"  # "joystick" (sport Move) or "tour" (SCAN-Planner)
         self.scan_proc = None           # SCAN-Planner launch subprocess
+        self.ai_history = []            # AI chat history [{role, content}]
+        self.ai_client = None           # websocket that owns the AI session
+        self.ai_started = False
+        self.ai_busy = False
+        self.ai_model = self.AI_MODEL   # 当前会话模型，可由前端指定
 
     async def broadcast_state(self):
         """Push the current map + robot state to all clients."""
@@ -345,7 +388,7 @@ class WebApp:
             await asyncio.sleep(1.0 / hz)
 
     # ---- command handling ----
-    def handle_message(self, data):
+    def handle_message(self, data, websocket=None):
         try:
             msg = json.loads(data)
         except Exception:
@@ -413,8 +456,14 @@ class WebApp:
         if mtype == "emergency":
             return self._handle_emergency()
 
+        if mtype == "ai":
+            return self._handle_ai(msg, websocket)
+
         if mtype == "config":
             return self._handle_config(msg)
+
+        if mtype == "restart":
+            return self._handle_restart()
 
         return {"ok": False, "error": f"unknown type {mtype}"}
 
@@ -432,6 +481,219 @@ class WebApp:
         self.control_mode = "joystick"
         log.warning("EMERGENCY STOP: all stopped, robot in damping mode")
         return {"ok": True, "msg": "急停：已停止所有程序，机器人进入阻尼状态"}
+
+    # ---- AI chat session (Ollama REST API on host: 11434) ----
+    OLLAMA_API = "http://127.0.0.1:11434"
+    AI_MODEL = "gemma4:e2b-it-qat"
+
+    def _ollama_post(self, path, payload, timeout=120):
+        req = urllib.request.Request(
+            self.OLLAMA_API + path,
+            data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json"})
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read())
+
+    def _ollama_get(self, path, timeout=10):
+        req = urllib.request.Request(self.OLLAMA_API + path)
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return json.loads(r.read())
+
+    async def _ai_push(self, payload, client=None):
+        target = client or self.ai_client
+        if target:
+            try:
+                await target.send(json.dumps({"type": "ai", **payload}))
+            except Exception:
+                pass
+
+    async def _ai_check_and_start(self):
+        try:
+            timeout = aiohttp.ClientTimeout(total=15)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(self.OLLAMA_API + "/api/tags") as r:
+                    tags = await r.json()
+            models = [m.get("name", "") for m in tags.get("models", [])]
+            if not any(m.split(":")[0] == self.ai_model.split(":")[0] for m in models):
+                await self._ai_push({
+                    "op": "error",
+                    "error": f"模型 {self.ai_model} 未下载。请在 Jetson 上运行: ollama pull {self.ai_model}"})
+                return
+            self.ai_started = True
+            await self._ai_push({"op": "started", "model": self.ai_model})
+        except Exception as e:
+            await self._ai_push({"op": "error", "error": f"ollama 服务不可达: {e}"})
+
+    async def _ai_list_models(self, client=None):
+        """把 ollama 已下载的模型列表推给前端，供模型下拉框使用。"""
+        try:
+            timeout = aiohttp.ClientTimeout(total=10)
+            async with aiohttp.ClientSession(timeout=timeout) as session:
+                async with session.get(self.OLLAMA_API + "/api/tags") as r:
+                    tags = await r.json()
+            models = [m.get("name", "") for m in tags.get("models", []) if m.get("name")]
+            await self._ai_push(
+                {"op": "models", "models": models, "default": self.ai_model}, client=client)
+        except Exception as e:
+            await self._ai_push({"op": "models", "models": [], "error": str(e)}, client=client)
+
+    def _handle_ai(self, msg, websocket):
+        op = msg.get("op")
+        if op == "start":
+            self.ai_client = websocket
+            self.ai_history = []
+            self.ai_model = msg.get("model") or self.AI_MODEL
+            asyncio.ensure_future(self._ai_check_and_start())
+            return {"ok": True, "model": self.ai_model}
+        if op == "models":
+            asyncio.ensure_future(self._ai_list_models(client=websocket))
+            return {"ok": True}
+        if op == "end":
+            # 先捕获客户端再清空，否则 ended 消息推不出去
+            client = self.ai_client
+            self.ai_client = None
+            self.ai_started = False
+            self.ai_history = []
+            asyncio.ensure_future(self._ai_push({"op": "ended"}, client=client))
+            return {"ok": True}
+        if not self.ai_started:
+            return {"ok": False, "error": "AI 会话未启动，请先启动对话"}
+        if op == "send":
+            asyncio.ensure_future(self._ai_chat(msg.get("text", "")))
+            return {"ok": True}
+        if op == "image":
+            asyncio.ensure_future(
+                self._ai_image(msg.get("data", ""), msg.get("name", "camera.jpg")))
+            return {"ok": True}
+        if op == "video":
+            asyncio.ensure_future(
+                self._ai_video(msg.get("data", ""), msg.get("name", "camera.mp4")))
+            return {"ok": True}
+        return {"ok": False, "error": f"unknown ai op {op}"}
+
+    async def _ai_stream(self):
+        """向 ollama 发起流式 chat（messages 取 self.ai_history），逐段推给前端。
+        返回完整回复文本。"""
+        timeout = aiohttp.ClientTimeout(total=300)
+        full = ""
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.post(
+                    self.OLLAMA_API + "/api/chat",
+                    json={"model": self.ai_model,
+                          "messages": self.ai_history,
+                          "stream": True,
+                          "think": False}) as resp:
+                resp.raise_for_status()
+                async for raw in resp.content:
+                    line = raw.decode(errors="replace").strip()
+                    if not line:
+                        continue
+                    chunk = json.loads(line)
+                    piece = chunk.get("message", {}).get("content", "")
+                    if piece:
+                        full += piece
+                        await self._ai_push(
+                            {"op": "output", "text": piece, "final": False})
+                    if chunk.get("done", False):
+                        break
+        return full
+
+    async def _ai_chat(self, text):
+        if self.ai_busy:
+            await self._ai_push({"op": "error", "error": "上一条还在回复中"})
+            return
+        self.ai_busy = True
+        try:
+            self.ai_history.append({"role": "user", "content": text})
+            full = await self._ai_stream()
+            if full.strip():
+                self.ai_history.append({"role": "assistant", "content": full.strip()})
+            await self._ai_push({"op": "output", "text": "", "final": True})
+            log.info("ai chat done (%d chars)", len(full))
+        except Exception as e:
+            if self.ai_history and self.ai_history[-1].get("role") == "user":
+                self.ai_history.pop()
+            await self._ai_push({"op": "output", "text": "", "final": True})
+            await self._ai_push({"op": "error", "error": str(e)})
+            log.error("ai chat failed: %s", e)
+        finally:
+            self.ai_busy = False
+
+    async def _ai_chat_images(self, prompt, image_paths):
+        """图片/视频帧分析：本地图片转 base64，流式交给 ollama 逐段返回。"""
+        if self.ai_busy:
+            await self._ai_push({"op": "error", "error": "上一条还在回复中"})
+            return
+        self.ai_busy = True
+        try:
+            images = []
+            for p in image_paths:
+                with open(p, "rb") as f:
+                    images.append(base64.b64encode(f.read()).decode())
+            self.ai_history.append({"role": "user", "content": prompt, "images": images})
+            full = await self._ai_stream()
+            if full.strip():
+                self.ai_history.append({"role": "assistant", "content": full.strip()})
+            await self._ai_push({"op": "output", "text": "", "final": True})
+            log.info("ai image analysis done (%d chars)", len(full))
+        except Exception as e:
+            if self.ai_history and self.ai_history[-1].get("images"):
+                self.ai_history.pop()
+            await self._ai_push({"op": "output", "text": "", "final": True})
+            await self._ai_push({"op": "error", "error": str(e)})
+            log.error("ai image analysis failed: %s", e)
+        finally:
+            self.ai_busy = False
+
+    async def _ai_image(self, b64data, name):
+        try:
+            os.makedirs(UPLOAD_DIR, exist_ok=True)
+            ts = int(time.time() * 1000)
+            path = os.path.join(UPLOAD_DIR, f"img_{ts}.jpg")
+            with open(path, "wb") as f:
+                f.write(base64.b64decode(b64data))
+            await self._ai_push({"op": "saved"})
+            log.info("image saved: %s", path)
+            await self._ai_chat_images("请用中文描述这张图片的内容。", [path])
+        except Exception as e:
+            await self._ai_push({"op": "error", "error": f"图片处理失败: {e}"})
+
+    async def _ai_video(self, b64data, name):
+        """Save video, extract 3 key frames with ffmpeg, analyze them together."""
+        try:
+            os.makedirs(UPLOAD_DIR, exist_ok=True)
+            ts = int(time.time() * 1000)
+            ext = os.path.splitext(name)[1] or ".mp4"
+            vpath = os.path.join(UPLOAD_DIR, f"vid_{ts}{ext}")
+            with open(vpath, "wb") as f:
+                f.write(base64.b64decode(b64data))
+            await self._ai_push({"op": "saved"})
+            # duration via ffprobe
+            try:
+                out = subprocess.run(
+                    ["ffprobe", "-v", "quiet", "-show_entries", "format=duration",
+                     "-of", "csv=p=0", vpath],
+                    capture_output=True, text=True, timeout=15).stdout.strip()
+                dur = max(float(out), 1.0)
+            except Exception:
+                dur = 10.0
+            frames = []
+            for i, frac in enumerate((0.25, 0.5, 0.75)):
+                fp = os.path.join(UPLOAD_DIR, f"frame_{ts}_{i}.jpg")
+                t = min(dur * frac, max(dur - 0.1, 0.0))
+                subprocess.run(["ffmpeg", "-y", "-loglevel", "quiet",
+                                "-ss", str(t), "-i", vpath, "-frames:v", "1", fp],
+                               capture_output=True, timeout=30)
+                if os.path.isfile(fp):
+                    frames.append(fp)
+            if not frames:
+                await self._ai_push({"op": "error", "error": "视频抽帧失败"})
+                return
+            log.info("video frames extracted: %s", frames)
+            await self._ai_chat_images(
+                "这是同一段视频在不同时间点的三帧画面，请用中文描述这段视频的内容。", frames)
+        except Exception as e:
+            await self._ai_push({"op": "error", "error": f"视频处理失败: {e}"})
 
     # ---- SCAN-Planner process control ----
     def scan_running(self):
@@ -495,9 +757,23 @@ class WebApp:
 
             async def _preview():
                 try:
-                    path = await tts.synthesize(text, os.path.join(
-                        tts.AUDIO_DIR, f"preview_{int(time.time())}.mp3"))
-                    await tts.play(path)
+                    # Prefer the waypoint's own cache (the same file the tour
+                    # plays) so preview works offline; only synthesize when the
+                    # text has no cached audio yet.
+                    path = tts.audio_path(wp.get("id", 0), tts._text_hash(text))
+                    if os.path.isfile(path):
+                        await tts.play(path)
+                        return
+                    if await tts.speak(text, path):
+                        return
+                    # online TTS unavailable -> fall back to the waypoint's own
+                    # cached narration (its saved intro) if there is one
+                    fallback = tts.target_audio(wp)
+                    if fallback != path and os.path.isfile(fallback):
+                        log.warning("preview: TTS unavailable, playing cached %s", fallback)
+                        await tts.play(fallback)
+                    else:
+                        log.warning("preview: TTS unavailable and no cache for waypoint %s", wid)
                 except Exception as e:
                     log.warning("preview error: %s", e)
             asyncio.create_task(_preview())
@@ -585,6 +861,23 @@ class WebApp:
             save_config(self.cfg)
             return {"ok": True, "waypoints": wps}
 
+        if op == "reposition":
+            # Re-record an existing waypoint at the robot's current position
+            # (used when an exhibit spot is unusable and needs re-placing).
+            wid = int(msg["id"])
+            pos = self.bridge.snapshot()["position"]
+            yaw = self.bridge.snapshot()["yaw"]
+            if not math.isfinite(pos[0]) and not math.isfinite(pos[1]):
+                return {"ok": False, "error": "no valid odometry to record"}
+            for w in wps:
+                if w["id"] == wid:
+                    w["x"] = round(pos[0], 3)
+                    w["y"] = round(pos[1], 3)
+                    w["z"] = round(pos[2], 3)
+                    w["yaw"] = round(yaw, 3)
+            save_config(self.cfg)
+            return {"ok": True, "waypoints": wps}
+
         return {"ok": False, "error": f"unknown waypoint op {op}"}
 
     def _handle_tour(self, msg):
@@ -611,6 +904,12 @@ class WebApp:
             return {"ok": True, key: self.cfg[key]}
         return {"ok": False, "error": f"unknown config key {key}"}
 
+    def _handle_restart(self):
+        """Restart this process in place (re-initialises the ROS/DDS bridge)."""
+        log.warning("restart requested via web UI")
+        asyncio.get_event_loop().call_later(1.0, _reexec)
+        return {"ok": True, "msg": "正在重启…"}
+
 
 # --------------------------------------------------------------------------
 # HTTP static server + entry
@@ -630,11 +929,13 @@ async def http_handler(connection, request):
     path = request.path
     if path in ("/ws", "/ws/"):
         return None  # let the WebSocket handshake proceed
-    # route: "/" -> main panel, "/console" -> tour console
+    # route: "/" -> main panel, "/console" -> tour console, "/ai" -> AI panel
     if path in ("/", ""):
         path = "/index.html"
     elif path in ("/console", "/console/"):
         path = "/console.html"
+    elif path in ("/ai", "/ai/"):
+        path = "/ai.html"
     # basic path traversal guard
     full = os.path.normpath(os.path.join(STATIC_DIR, path.lstrip("/")))
     if not full.startswith(STATIC_DIR) or not os.path.isfile(full):
@@ -662,19 +963,38 @@ async def ws_handler(websocket):
             "waypoints": app.cfg.get("waypoints", []),
         }))
         async for raw in websocket:
-            resp = app.handle_message(raw)
+            resp = app.handle_message(raw, websocket)
             if resp:
                 await websocket.send(json.dumps({"type": "ack", **resp}))
     except websockets.exceptions.ConnectionClosed:
         pass
     finally:
         app.clients.discard(websocket)
+        if app.ai_client is websocket:
+            app.ai_client = None
+            app.ai_started = False
         log.info("client disconnected")
+
+
+async def ai_startup_probe():
+    """诊断：启动时立即测 ollama GET 是否在 web 进程内正常工作。"""
+    t0 = asyncio.get_event_loop().time()
+    try:
+        timeout = aiohttp.ClientTimeout(total=15)
+        async with aiohttp.ClientSession(timeout=timeout) as session:
+            async with session.get("http://127.0.0.1:11434/api/tags") as r:
+                data = await r.json()
+        log.info("AI_PROBE: OK %.1fs models=%d",
+                 asyncio.get_event_loop().time() - t0, len(data.get("models", [])))
+    except Exception as e:
+        log.error("AI_PROBE: FAILED after %.1fs: %s",
+                  asyncio.get_event_loop().time() - t0, e)
 
 
 async def main():
     cfg = load_config()
     bridge, thread = rb.start_bridge(cfg)
+    asyncio.create_task(ai_startup_probe())
 
     app = WebApp(cfg, bridge)
     WebApp.inst = app
@@ -692,6 +1012,7 @@ async def main():
         handler,
         host,
         port,
+        max_size=64 * 1024 * 1024,
         process_request=http_handler,
     )
     log.info("go2 web console listening on http://%s:%d", host, port)
@@ -703,5 +1024,13 @@ if __name__ == "__main__":
                         format="%(asctime)s [%(levelname)s] %(name)s: %(message)s")
     try:
         asyncio.run(main())
+        # 正常情况下 main() 永不返回（server.wait_closed() 一直挂着）。
+        # 走到这里说明事件循环自己结束了 —— 记下来，这是 app 静默消失的一种可能。
+        log.warning("main() returned normally -- event loop finished, exiting")
     except KeyboardInterrupt:
-        pass
+        log.warning("KeyboardInterrupt -- exiting")
+    except BaseException:
+        log.exception("main() raised -- exiting")
+        raise
+    finally:
+        logging.shutdown()

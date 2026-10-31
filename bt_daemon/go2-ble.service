@@ -1,0 +1,20 @@
+[Unit]
+Description=Go2 BLE GATT 外设 (Web Bluetooth 直连)
+After=bluetooth.service
+Wants=bluetooth.service
+# bluetoothd 重启会丢掉 GATT/广播注册。go2-ble 自己会监听 NameOwnerChanged
+# 重新注册，但这里再挂一个 PartOf 双保险（重启比等 5s 更快恢复）。
+PartOf=bluetooth.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /home/unitree/hu/go2/web/bt_daemon/go2-ble.py
+Restart=always
+RestartSec=3
+SyslogIdentifier=go2-ble
+# 不要因为异常触发 apport（会和 apt 抢锁，历史上把进程拖死过）
+Environment=PYTHONUNBUFFERED=1
+Environment=APPORT_DISABLE=1
+
+[Install]
+WantedBy=multi-user.target

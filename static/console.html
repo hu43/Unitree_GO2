@@ -30,22 +30,50 @@
 
     <!-- 控制面板 -->
     <aside id="side">
-      <!-- 运动控制 -->
+      <!-- 遥控驾驶（姿态/动作/特殊步态已移到 /motion 独立页面） -->
       <section class="card">
-        <h2>🕹️ 运动控制</h2>
+        <h2>🕹️ 遥控驾驶 <button class="home-btn" style="float:right;font-size:12px;padding:4px 8px" onclick="location.href='/motion'">运动模式 →</button></h2>
         <div class="control-row">
           <div id="joystick"><div class="stick" id="stick-knob"></div></div>
           <div class="btn-grid">
-            <button class="act" data-act="standup">🟢 站立</button>
-            <button class="act unlock" data-act="recovery">🔓 解除锁定 START</button>
-            <button class="act" data-act="standdown">🛌 卧倒</button>
             <button class="act danger" data-act="stop">⛔ 急停</button>
+            <button class="act" data-act="stopmove">⏹ 停止移动</button>
           </div>
+        </div>
+        <!-- 基础姿态：与「运动模式」页面的 data-sport 走同一条 sport 通道 -->
+        <div class="pose-row">
+          <button class="act" data-act="standup">🟢 站立</button>
+          <button class="act" data-act="standdown">🛌 卧倒</button>
+          <button class="act unlock" data-act="recovery">🔓 恢复站立</button>
         </div>
         <div class="slider-row">
           <span>速度 <b id="speed-val">0.50</b></span>
           <input type="range" id="speed-slider" min="0.1" max="1.0" step="0.05" value="0.5">
         </div>
+        <p class="hint">特殊步态 / 表演动作请在「🕹️ 运动模式」页面操作</p>
+      </section>
+
+      <!-- SLAM 持久地图（persistent_map=false 时由 applyPersistentMode 隐藏）-->
+      <section class="card" id="slam-card">
+        <h2>🗺️ SLAM 持久地图 <span class="hint">（修定位漂移）</span></h2>
+        <div id="slam-state" class="slam-state">状态: 关闭（内置里程计）</div>
+        <div class="slam-row">
+          <input id="slam-name" class="slam-input" placeholder="地图名，如 venue" value="venue">
+          <select id="slam-maps" class="slam-select"></select>
+        </div>
+        <div class="tour-row">
+          <button id="btn-slam-map">🧭 开始建图</button>
+          <button id="btn-slam-save">💾 完成并保存</button>
+          <button id="btn-slam-discard" class="danger">✖ 放弃建图</button>
+        </div>
+        <div class="tour-row">
+          <button id="btn-slam-loc">📍 加载地图定位</button>
+          <button id="btn-slam-locstop" class="danger">⏹ 停止定位</button>
+        </div>
+        <div class="tour-row">
+          <button id="btn-mapview" onclick="location.href='/mapview'">🗺️ 查看地图全貌</button>
+        </div>
+        <p class="hint">建图：摇杆/遥控牵狗走完展厅（尽量闭环回起点）→ 完成并保存。定位：加载后若位置对不上（狗不在建图起点），到「🗺️ 查看地图全貌」里用「在地图上点选」标出狗的实际位置，再应用即可。</p>
       </section>
 
       <!-- 展品点位 -->
@@ -55,6 +83,7 @@
           <button id="btn-record">📸 记录当前点</button>
           <button id="btn-save">💾 保存</button>
         </div>
+        <div id="wp-frame" class="wp-frame">点位坐标系: 内置里程计（odom）</div>
         <ul id="wp-list"></ul>
         <p class="hint">摇杆开到展品前点"记录"，或地图上选"加路径点"模式点击</p>
       </section>
@@ -67,6 +96,7 @@
           <li class="tour-empty">未选择展品</li>
         </ol>
         <div class="tour-row">
+          <button id="btn-tour-all">✅ 全选</button>
           <button id="btn-tour-clear">🗑 清空顺序</button>
           <button id="btn-tour-start">▶ 开始导览</button>
           <button id="btn-tour-stop" class="danger">⏹ 停止</button>
@@ -94,6 +124,7 @@
           <div>朝向: <b id="st-yaw">-</b></div>
           <div>导览: <b id="st-tour">-</b></div>
           <div>地图点: <b id="st-map">0</b></div>
+          <div>坐标系: <b id="st-frame">-</b></div>
         </div>
       </section>
     </aside>

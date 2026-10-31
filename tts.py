@@ -39,12 +39,35 @@ def _text_hash(text):
     return hashlib.md5(text.encode("utf-8")).hexdigest()[:8]
 
 
+def _find_by_hash(text_hash):
+    """按文本哈希找已缓存的讲解音频，忽略文件名里的 waypoint id。
+
+    文件名带 id 只是为了人眼可读；id 会随点位库重建而变（map 库与 odom 库的
+    id 完全不同），导致同一段文本明明有缓存却命中不了、退回联网合成。
+    文本哈希已唯一确定内容，故按哈希兜底。
+    """
+    suffix = "_" + text_hash + ".mp3"
+    try:
+        for f in sorted(os.listdir(AUDIO_DIR)):
+            if f.startswith("intro_") and f.endswith(suffix):
+                p = os.path.join(AUDIO_DIR, f)
+                if os.path.isfile(p) and os.path.getsize(p) > 0:
+                    return p
+    except OSError:
+        pass
+    return None
+
+
 def target_audio(wp):
     """Return the audio file to use for a waypoint's narration.
 
     An existing file (custom wp['audio'], or a cached synthesis bound to the
     current intro text) is returned as-is; otherwise this returns the cache
     path that speak() should synthesize into.
+
+    Cached audio is looked up by text hash first, so renumbering waypoints
+    does not orphan an already-synthesized clip (edge-tts is currently
+    403-blocked online, so a cache miss means silence).
     """
     custom = wp.get("audio", "")
     if custom:
@@ -54,7 +77,16 @@ def target_audio(wp):
         if os.path.isfile(custom):
             return custom
     text = wp.get("intro", "").strip() or DEFAULT_INTRO
-    return audio_path(wp.get("id", 0), _text_hash(text))
+    th = _text_hash(text)
+    exact = audio_path(wp.get("id", 0), th)
+    if os.path.isfile(exact) and os.path.getsize(exact) > 0:
+        return exact
+    found = _find_by_hash(th)
+    if found:
+        log.info("tts: 缓存按哈希命中 %s (waypoint %s)", os.path.basename(found),
+                 wp.get("id"))
+        return found
+    return exact
 
 
 def _speaker_device():

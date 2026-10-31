@@ -1,0 +1,15 @@
+[Unit]
+Description=Go2 network/bluetooth config daemon (wifi scan/connect, AP, BT SPP)
+Documentation=file:///home/unitree/hu/go2/web/netd/README.md
+After=NetworkManager.service bluetooth.service
+Wants=NetworkManager.service
+
+[Service]
+Type=simple
+ExecStart=/usr/bin/python3 /home/unitree/hu/go2/web/netd/go2-netd.py
+Restart=always
+RestartSec=2
+User=root
+
+[Install]
+WantedBy=multi-user.target

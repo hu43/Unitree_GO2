@@ -1,0 +1,569 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Go2 地图查看器</title>
+<style>
+  :root{
+    --bg:#0f1420; --card:#1a2233; --card2:#232d42; --fg:#e8ecf4;
+    --muted:#8b95a8; --accent:#4a9eff; --ok:#34d399; --warn:#fbbf24; --danger:#f87171;
+  }
+  *{box-sizing:border-box; margin:0; padding:0;}
+  body{background:var(--bg); color:var(--fg); font-family:system-ui,-apple-system,"Segoe UI",sans-serif; height:100vh; overflow:hidden;}
+  header{display:flex; align-items:center; gap:12px; padding:10px 16px; background:var(--card); border-bottom:1px solid #2a3550;}
+  header h1{font-size:15px; font-weight:600;}
+  .spacer{flex:1;}
+  select,input,button{background:var(--card2); color:var(--fg); border:1px solid #33415e; border-radius:7px; padding:7px 10px; font-size:13px;}
+  button{cursor:pointer;}
+  button:hover{border-color:var(--accent);}
+  button.active{background:#24426b; border-color:var(--accent); color:#cfe4ff;}
+  .home-btn{background:#2a3550; border-color:#3b4a6b;}
+  main{display:flex; height:calc(100vh - 53px);}
+  #canvas-wrap{flex:1; position:relative; background:#0b0f18; overflow:hidden;}
+  canvas{display:block; width:100%; height:100%; cursor:grab;}
+  canvas.dragging{cursor:grabbing;}
+  #hud{position:absolute; left:12px; bottom:12px; background:rgba(16,22,35,.88); border:1px solid #2a3550;
+       border-radius:8px; padding:9px 12px; font-size:12px; line-height:1.7; color:var(--muted); pointer-events:none;}
+  #hud b{color:var(--fg); font-weight:600;}
+  aside{width:310px; border-left:1px solid #2a3550; background:var(--card); overflow-y:auto; padding:12px;}
+  .card{padding:10px 0; border-bottom:1px solid #2a3550;}
+  .card h2{font-size:13px; color:var(--accent); margin-bottom:8px;}
+  .row{display:flex; gap:8px; margin-bottom:8px; align-items:center;}
+  .row > *{flex:1; min-width:0;}
+  .row.tight > *{flex:0 0 auto;}
+  .hint{font-size:11.5px; color:var(--muted); line-height:1.6;}
+  .kv{font-size:12.5px; line-height:1.9; color:var(--muted);}
+  .kv b{color:var(--fg); font-weight:600; float:right;}
+  .badge{display:inline-block; padding:2px 8px; border-radius:10px; font-size:11px; background:#24426b; color:#9cc7ff;}
+  .badge.active{background:#1d4d3a; color:var(--ok);}
+  label.chk{display:flex; align-items:center; gap:7px; font-size:12.5px; color:var(--muted); margin-bottom:6px; cursor:pointer;}
+  label.chk input{flex:0 0 auto; width:15px; height:15px; accent-color:var(--accent);}
+</style>
+</head>
+<body>
+<header>
+  <h1>🗺️ Go2 地图查看器</h1>
+  <select id="map-select" style="min-width:180px"></select>
+  <button id="btn-fit">⤢ 适应窗口</button>
+  <button id="btn-1to1">🔍 放大细看</button>
+  <span id="active-badge" class="badge">未定位</span>
+  <div class="spacer"></div>
+  <span id="conn" style="font-size:12px;color:var(--muted)">● 未连接</span>
+  <button class="home-btn" onclick="location.href='/console'">← 返回控制台</button>
+</header>
+
+<main>
+  <div id="canvas-wrap">
+    <canvas id="cv"></canvas>
+    <div id="hud"></div>
+  </div>
+  <aside>
+    <section class="card">
+      <h2>地图信息</h2>
+      <div class="kv" id="meta">选择地图…</div>
+    </section>
+
+    <section class="card">
+      <h2>显示</h2>
+      <label class="chk"><input type="checkbox" id="opt-grid" checked> 1 米网格</label>
+      <label class="chk"><input type="checkbox" id="opt-axes" checked> 坐标轴与刻度</label>
+      <label class="chk"><input type="checkbox" id="opt-wp" checked> 导览点位</label>
+      <label class="chk"><input type="checkbox" id="opt-robot" checked> 实时位姿（需定位）</label>
+      <label class="chk"><input type="checkbox" id="opt-origin" checked> 地图原点</label>
+    </section>
+
+    <section class="card">
+      <h2>对比模式</h2>
+      <div class="row">
+        <select id="cmp-select"><option value="">（不对比）</option></select>
+      </div>
+      <label class="chk"><input type="checkbox" id="opt-cmp"> 叠加另一张地图</label>
+      <p class="hint">把另一张地图以半透明红色叠加在当前地图上，可直接看出两次建图的偏差。</p>
+    </section>
+
+    <section class="card">
+      <h2>初始位姿（定位对不上时用）</h2>
+      <p class="hint">点「在地图上点选」，再点地图上机器人实际所在位置，填入朝向（可先填 0，扫描匹配会自动微调），然后应用。适用于狗每次停在不同的位置。</p>
+      <div class="row tight" style="margin-top:8px">
+        <button id="btn-pick-pose">🎯 在地图上点选</button>
+      </div>
+      <div class="row" style="margin-top:8px">
+        <input id="pose-yaw" type="number" step="5" value="0" placeholder="朝向(度)">
+        <button id="btn-apply-pose" disabled>应用并重新定位</button>
+      </div>
+      <div id="pose-picked" class="hint">未选择位置</div>
+    </section>
+
+    <section class="card">
+      <h2>操作</h2>
+      <p class="hint">拖拽平移 · 滚轮缩放 · 双击适应窗口。地图文件位于机器人 <code>/home/unitree/hu/go2/slam_maps/</code>，每次打开页面读取最新文件。</p>
+      <div class="row tight" style="margin-top:8px">
+        <button id="btn-refresh">🔄 重新加载</button>
+      </div>
+    </section>
+  </aside>
+</main>
+
+<script>
+"use strict";
+const $ = (id) => document.getElementById(id);
+const cv = $("cv"), ctx = cv.getContext("2d");
+
+const state = {
+  maps: [], meta: null, img: null, cmpImg: null, cmpTint: null, cmpMeta: null,
+  pos: {x:0,y:0}, yaw: 0, slam: {mode:"off", map:"", tf_ok:false},
+  view: {cx:0, cy:0, scale:1},
+  drag: null, ws: null, liveScan: [],
+  picking: false, pickedPose: null,
+};
+
+function dpr(){ return window.devicePixelRatio || 1; }
+function resize(){
+  const r = cv.getBoundingClientRect();
+  cv.width = Math.round(r.width * dpr());
+  cv.height = Math.round(r.height * dpr());
+  draw();
+}
+
+// world(m) -> screen(px)
+function wx(x){ return (x - state.view.cx) * state.view.scale + cv.width/(2*dpr()); }
+function wy(y){ return (cv.height/(2*dpr())) - (y - state.view.cy) * state.view.scale; }
+function worldFromScreen(px, py){
+  return {
+    x: (px - cv.width/(2*dpr()))/state.view.scale + state.view.cx,
+    y: state.view.cy - (py - cv.height/(2*dpr()))/state.view.scale,
+  };
+}
+
+function fitView(){
+  const m = state.meta;
+  if (!m) return;
+  const [x0,y0,x1,y1] = m.extent;
+  const W = cv.width/dpr(), H = cv.height/dpr();
+  const sx = W / Math.max(0.01, (x1-x0));
+  const sy = H / Math.max(0.01, (y1-y0));
+  state.view.scale = Math.min(sx, sy) * 0.94;
+  state.view.cx = (x0+x1)/2;
+  state.view.cy = (y0+y1)/2;
+  draw();
+}
+
+function drawGrid(){
+  const m = state.meta; if (!m) return;
+  const s = state.view.scale;
+  // 自适应网格间距
+  let step = 1;
+  while (step * s < 45) step *= 2;
+  while (step * s > 220) step /= 2;
+
+  const W = cv.width/dpr(), H = cv.height/dpr();
+  const tl = worldFromScreen(0,0), br = worldFromScreen(W,H);
+  const xMin = Math.floor(Math.min(tl.x,br.x)/step)*step;
+  const xMax = Math.ceil(Math.max(tl.x,br.x)/step)*step;
+  const yMin = Math.floor(Math.min(tl.y,br.y)/step)*step;
+  const yMax = Math.ceil(Math.max(tl.y,br.y)/step)*step;
+
+  ctx.save();
+  ctx.scale(dpr(), dpr());
+  ctx.lineWidth = 1;
+  ctx.font = "11px ui-monospace, monospace";
+
+  for (let gx = xMin; gx <= xMax + 1e-6; gx += step){
+    const X = wx(gx);
+    ctx.strokeStyle = Math.abs(gx) < 1e-9 ? "rgba(255,200,0,.45)" : "rgba(70,95,140,.35)";
+    ctx.beginPath(); ctx.moveTo(X, 0); ctx.lineTo(X, H); ctx.stroke();
+    if (state.opts.axes){
+      ctx.fillStyle = "rgba(150,180,220,.75)";
+      ctx.fillText(gx.toFixed(step < 1 ? 1 : 0), X + 3, 12);
+    }
+  }
+  for (let gy = yMin; gy <= yMax + 1e-6; gy += step){
+    const Y = wy(gy);
+    ctx.strokeStyle = Math.abs(gy) < 1e-9 ? "rgba(255,200,0,.45)" : "rgba(70,95,140,.35)";
+    ctx.beginPath(); ctx.moveTo(0, Y); ctx.lineTo(W, Y); ctx.stroke();
+    if (state.opts.axes){
+      ctx.fillStyle = "rgba(150,180,220,.75)";
+      ctx.fillText(gy.toFixed(step < 1 ? 1 : 0), 3, Y - 3);
+    }
+  }
+  ctx.restore();
+}
+
+function drawMap(){
+  const m = state.meta, img = state.img;
+  if (!m || !img) return;
+  const [x0,y0,x1,y1] = m.extent;
+  const X0 = wx(x0), Y0 = wy(y1), Wpx = (x1-x0)*state.view.scale, Hpx = (y1-y0)*state.view.scale;
+  ctx.save();
+  ctx.scale(dpr(), dpr());   // 与其它绘制函数一致：按设备像素比缩放
+  ctx.imageSmoothingEnabled = false;
+  ctx.globalAlpha = 1;
+  ctx.drawImage(img, X0, Y0, Wpx, Hpx);
+  ctx.restore();
+
+  if (state.opts.cmp && state.cmpTint && state.cmpMeta){
+    const c = state.cmpMeta;
+    const [cx0,cy0,cx1,cy1] = c.extent;
+    ctx.save();
+    ctx.scale(dpr(), dpr());
+    ctx.globalAlpha = 0.85;
+    ctx.imageSmoothingEnabled = false;
+    ctx.drawImage(state.cmpTint, wx(cx0), wy(cy1),
+                  (cx1-cx0)*state.view.scale, (cy1-cy0)*state.view.scale);
+    ctx.restore();
+  }
+}
+
+function drawWaypoints(){
+  const m = state.meta; if (!m || !state.opts.wp) return;
+  const wps = state.wps || [];
+  ctx.save();
+  ctx.scale(dpr(), dpr());
+  for (const w of wps){
+    const X = wx(w.x), Y = wy(w.y);
+    ctx.beginPath(); ctx.arc(X, Y, 6, 0, Math.PI*2);
+    ctx.fillStyle = "rgba(52,211,153,.28)"; ctx.fill();
+    ctx.strokeStyle = "#34d399"; ctx.lineWidth = 1.6; ctx.stroke();
+    ctx.fillStyle = "#9fe8c8"; ctx.font = "11px system-ui";
+    ctx.fillText(w.name || ("点" + w.id), X + 9, Y - 5);
+  }
+  ctx.restore();
+}
+
+function drawPickedPose(){
+  if (!state.pickedPose) return;
+  const p = state.pickedPose;
+  const X = wx(p.x), Y = wy(p.y);
+  const yaw = (parseFloat($("pose-yaw").value) || 0) * Math.PI / 180;
+  ctx.save(); ctx.scale(dpr(), dpr());
+  ctx.strokeStyle = "#fbbf24"; ctx.lineWidth = 2.2;
+  ctx.beginPath(); ctx.arc(X, Y, 9, 0, Math.PI*2); ctx.stroke();
+  ctx.beginPath(); ctx.moveTo(X, Y);
+  ctx.lineTo(X + 24*Math.cos(-yaw), Y + 24*Math.sin(-yaw)); ctx.stroke();
+  ctx.fillStyle = "#fbbf24"; ctx.font = "11px ui-monospace";
+  ctx.fillText(`(${p.x.toFixed(2)}, ${p.y.toFixed(2)})`, X + 11, Y + 16);
+  ctx.restore();
+}
+
+function drawRobot(){
+  if (!state.opts.robot) return;
+  if (state.slam.mode !== "localization" || !state.slam.tf_ok) return;
+  // 地图系位姿：定位时后端给的 pos 是 odom 系，需要换算；这里用后端提供的 map 位姿
+  const p = state.robotMap;
+  if (!p) return;
+  const X = wx(p[0]), Y = wy(p[1]);
+  ctx.save(); ctx.scale(dpr(), dpr());
+  ctx.beginPath(); ctx.arc(X, Y, 8, 0, Math.PI*2);
+  ctx.fillStyle = "rgba(52,211,153,.25)"; ctx.fill();
+  ctx.strokeStyle = "#34d399"; ctx.lineWidth = 2; ctx.stroke();
+  const L = 22;
+  ctx.beginPath(); ctx.moveTo(X, Y);
+  ctx.lineTo(X + L*Math.cos(-p[2]), Y + L*Math.sin(-p[2]));
+  ctx.strokeStyle = "#34d399"; ctx.lineWidth = 2.4; ctx.stroke();
+  ctx.restore();
+}
+
+function drawOrigin(){
+  if (!state.opts.origin || !state.meta) return;
+  const X = wx(0), Y = wy(0);
+  ctx.save(); ctx.scale(dpr(), dpr());
+  ctx.strokeStyle = "#fbbf24"; ctx.lineWidth = 1.6;
+  ctx.beginPath(); ctx.moveTo(X-9,Y); ctx.lineTo(X+9,Y);
+  ctx.moveTo(X,Y-9); ctx.lineTo(X,Y+9); ctx.stroke();
+  ctx.fillStyle = "rgba(251,191,36,.85)"; ctx.font = "11px ui-monospace";
+  ctx.fillText("(0,0)", X+7, Y+15);
+  ctx.restore();
+}
+
+function drawScaleBar(){
+  if (!state.meta) return;
+  const s = state.view.scale;
+  let meters = 1;
+  while (meters * s < 70) meters *= 2;
+  const W = cv.width/dpr(), H = cv.height/dpr();
+  ctx.save(); ctx.scale(dpr(), dpr());
+  const x = W - 20 - meters*s, y = H - 26;
+  ctx.strokeStyle = "#8b95a8"; ctx.lineWidth = 2;
+  ctx.beginPath(); ctx.moveTo(x, y); ctx.lineTo(x+meters*s, y);
+  ctx.moveTo(x, y-5); ctx.lineTo(x, y+5);
+  ctx.moveTo(x+meters*s, y-5); ctx.lineTo(x+meters*s, y+5); ctx.stroke();
+  ctx.fillStyle = "#8b95a8"; ctx.font = "12px ui-monospace";
+  ctx.fillText(meters + " m", x + meters*s/2 - 10, y - 9);
+  ctx.restore();
+}
+
+function draw(){
+  const W = cv.width/dpr(), H = cv.height/dpr();
+  ctx.setTransform(dpr(), 0, 0, dpr(), 0, 0);
+  ctx.fillStyle = "#0b0f18";
+  ctx.fillRect(0, 0, W, H);
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
+
+  drawMap();
+  if (state.opts.grid) drawGrid();
+  drawWaypoints();
+  drawOrigin();
+  drawPickedPose();
+  drawRobot();
+  drawScaleBar();
+  updateHud();
+}
+
+function updateHud(){
+  const m = state.meta;
+  if (!m){ $("hud").textContent = "请选择地图"; return; }
+  const info = [
+    `<b>${m.name}</b>`,
+    `${m.width}×${m.height} px · ${m.resolution} m/px`,
+    `范围 ${(m.extent[2]-m.extent[0]).toFixed(1)} × ${(m.extent[3]-m.extent[1]).toFixed(1)} m`,
+    `缩放 ${state.view.scale.toFixed(2)} px/m · 中心 (${state.view.cx.toFixed(1)}, ${state.view.cy.toFixed(1)})`,
+  ];
+  if (state.slam.mode === "localization" && state.robotMap)
+    info.push(`机器人 (${state.robotMap[0].toFixed(2)}, ${state.robotMap[1].toFixed(2)}) · ${(state.robotMap[2]*180/Math.PI).toFixed(1)}°`);
+  const q = state.slam.quality;
+  if (state.slam.mode === "localization" && q){
+    info.push(`定位匹配偏差 <b style="color:${state.slam.quality_ok ? "#34d399" : "#fbbf24"}">${q.residual.toFixed(2)} m</b> · 内点 ${(q.inliers*100).toFixed(0)}%`);
+    if (!state.slam.quality_ok)
+      info.push(`<b style="color:#fbbf24">偏差偏大：请用左侧「初始位姿」重新校准</b>`);
+  }
+  $("hud").innerHTML = info.join("<br>");
+}
+
+// ---------- 数据加载 ----------
+async function loadMapList(){
+  const r = await fetch("/api/maps", {cache:"no-store"});
+  const d = await r.json();
+  state.maps = d.maps || [];
+  const sel = $("map-select"), cmp = $("cmp-select");
+  const cur = sel.value;
+  sel.innerHTML = state.maps.map(m =>
+    `<option value="${m.name}">${m.name} · ${(m.extent[2]-m.extent[0]).toFixed(0)}×${(m.extent[3]-m.extent[1]).toFixed(0)}m${m.name===d.active?" (使用中)":""}</option>`
+  ).join("") || `<option value="">（暂无地图）</option>`;
+  if (cur && state.maps.some(m=>m.name===cur)) sel.value = cur;
+  else if (d.active && state.maps.some(m=>m.name===d.active)) sel.value = d.active;
+  else if (state.maps.length) sel.value = state.maps[0].name;
+
+  cmp.innerHTML = `<option value="">（不对比）</option>` + state.maps.map(m =>
+    `<option value="${m.name}">${m.name}</option>`).join("");
+
+  $("active-badge").textContent = d.mode === "localization"
+    ? `定位中: ${d.active}` : (d.mode === "mapping" ? "建图中" : "未定位");
+  $("active-badge").className = "badge" + (d.mode === "localization" ? " active" : "");
+  return d;
+}
+
+function loadImage(name){
+  // 后端以 JSON+base64 返回 PNG（规避 WsResponse 无 Content-Length 的兼容问题）
+  return fetch(`/api/map/${encodeURIComponent(name)}.png?t=${Date.now()}`, {cache:"no-store"})
+    .then(r => {
+      if (!r.ok) throw new Error("HTTP " + r.status);
+      return r.json();
+    })
+    .then(d => new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => resolve(img);
+      img.onerror = () => reject(new Error("image decode failed"));
+      img.src = "data:image/png;base64," + d.png_b64;
+    }));
+}
+
+async function selectMap(name){
+  if (!name) return;
+  try {
+    const r = await fetch(`/api/map/${encodeURIComponent(name)}.json`, {cache:"no-store"});
+    state.meta = await r.json();
+    state.wps = state.meta.waypoints || [];
+    state.img = await loadImage(name);
+    renderMeta();
+    fitView();
+  } catch (e) {
+    console.error(e);
+    $("meta").textContent = "加载失败: " + e;
+  }
+}
+
+// 把灰度地图转成"只保留墙体/障碍"的红色轮廓，便于叠加对比
+function tintObstacles(img){
+  const c = document.createElement("canvas");
+  c.width = img.width; c.height = img.height;
+  const x = c.getContext("2d");
+  x.drawImage(img, 0, 0);
+  const d = x.getImageData(0, 0, c.width, c.height);
+  const a = d.data;
+  for (let i = 0; i < a.length; i += 4){
+    const g = a[i];
+    if (g < 90) {            // 占用/障碍
+      a[i] = 255; a[i+1] = 60; a[i+2] = 60; a[i+3] = 255;
+    } else {                 // 空闲/未知 -> 透明
+      a[i+3] = 0;
+    }
+  }
+  x.putImageData(d, 0, 0);
+  return c;
+}
+
+async function selectCompare(name){
+  if (!name){ state.cmpImg = null; state.cmpTint = null; state.cmpMeta = null; draw(); return; }
+  try {
+    const r = await fetch(`/api/map/${encodeURIComponent(name)}.json`, {cache:"no-store"});
+    state.cmpMeta = await r.json();
+    state.cmpImg = await loadImage(name);
+    state.cmpTint = tintObstacles(state.cmpImg);
+    draw();
+  } catch(e){ console.error(e); }
+}
+
+function renderMeta(){
+  const m = state.meta; if (!m) return;
+  $("meta").innerHTML = [
+    `名称 <b>${m.name}</b>`,
+    `尺寸 <b>${m.width}×${m.height} px</b>`,
+    `分辨率 <b>${m.resolution} m/px</b>`,
+    `范围 <b>${(m.extent[2]-m.extent[0]).toFixed(1)}×${(m.extent[3]-m.extent[1]).toFixed(1)} m</b>`,
+    `原点 <b>(${m.origin[0].toFixed(2)}, ${m.origin[1].toFixed(2)})</b>`,
+    `点位 <b>${(m.waypoints||[]).length}</b>`,
+    `保存于 <b>${new Date(m.mtime*1000).toLocaleString()}</b>`,
+  ].join("<br>");
+}
+
+// ---------- 交互 ----------
+cv.addEventListener("pointerdown", (e)=>{
+  state.drag = {x:e.clientX, y:e.clientY, cx:state.view.cx, cy:state.view.cy};
+  state.dragStartPx = {x:e.clientX, y:e.clientY};
+  cv.classList.add("dragging"); cv.setPointerCapture(e.pointerId);
+});
+cv.addEventListener("pointermove", (e)=>{
+  if (!state.drag) return;
+  const dx = e.clientX - state.drag.x, dy = e.clientY - state.drag.y;
+  state.view.cx = state.drag.cx - dx/state.view.scale;
+  state.view.cy = state.drag.cy + dy/state.view.scale;
+  draw();
+});
+cv.addEventListener("pointerup", (e)=>{
+  state.drag = null; cv.classList.remove("dragging");
+  if (state.picking){
+    const rect = cv.getBoundingClientRect();
+    const moved = Math.hypot(e.clientX - state.dragStartPx.x, e.clientY - state.dragStartPx.y);
+    if (moved < 6){
+      const p = worldFromScreen(e.clientX - rect.left, e.clientY - rect.top);
+      state.pickedPose = {x: p.x, y: p.y};
+      state.picking = false;
+      $("btn-pick-pose").textContent = "🎯 在地图上点选";
+      $("btn-apply-pose").disabled = false;
+      $("pose-picked").textContent =
+        `已选 (${p.x.toFixed(2)}, ${p.y.toFixed(2)}) m · 填入朝向后点"应用"`;
+      cv.style.cursor = "grab";
+      draw();
+    }
+  }
+});
+cv.addEventListener("dblclick", fitView);
+cv.addEventListener("wheel", (e)=>{
+  e.preventDefault();
+  const rect = cv.getBoundingClientRect();
+  const px = e.clientX - rect.left, py = e.clientY - rect.top;
+  const before = worldFromScreen(px, py);
+  const k = e.deltaY < 0 ? 1.12 : 1/1.12;
+  state.view.scale = Math.max(0.5, Math.min(80, state.view.scale * k));
+  const after = worldFromScreen(px, py);
+  state.view.cx += before.x - after.x;
+  state.view.cy += before.y - after.y;
+  draw();
+}, {passive:false});
+
+$("map-select").addEventListener("change", (e)=> selectMap(e.target.value));
+$("cmp-select").addEventListener("change", (e)=> selectCompare(e.target.value));
+$("btn-fit").addEventListener("click", fitView);
+$("btn-1to1").addEventListener("click", ()=>{
+  state.view.scale = 40; // 40 px/m，便于看清 5cm 栅格
+  state.view.cx = (state.meta.extent[0]+state.meta.extent[2])/2;
+  state.view.cy = (state.meta.extent[1]+state.meta.extent[3])/2;
+  draw();
+});
+$("btn-refresh").addEventListener("click", async ()=>{
+  loading = true;
+  await loadMapList();
+  await selectMap($("map-select").value);
+  if ($("cmp-select").value) await selectCompare($("cmp-select").value);
+  loading = false;
+});
+
+const optsMap = {grid:"opt-grid", axes:"opt-axes", wp:"opt-wp", robot:"opt-robot",
+                 origin:"opt-origin", cmp:"opt-cmp"};
+function syncOpts(){
+  state.opts = {};
+  for (const [k,id] of Object.entries(optsMap)) state.opts[k] = $(id).checked;
+}
+for (const id of Object.values(optsMap)) $(id).addEventListener("change", ()=>{ syncOpts(); draw(); });
+
+// ---------- 初始位姿 ----------
+function wsSend(obj){
+  if (state.ws && state.ws.readyState === WebSocket.OPEN) {
+    state.ws.send(JSON.stringify(obj));
+  } else {
+    alert("WebSocket 未连接，请稍后重试");
+  }
+}
+
+$("btn-pick-pose").addEventListener("click", ()=>{
+  state.picking = !state.picking;
+  $("btn-pick-pose").textContent = state.picking ? "✖ 取消点选" : "🎯 在地图上点选";
+  cv.style.cursor = state.picking ? "crosshair" : "grab";
+  $("pose-picked").textContent = state.picking
+    ? "请在地图上点击机器人实际所在位置" : "未选择位置";
+});
+
+$("btn-apply-pose").addEventListener("click", ()=>{
+  if (!state.pickedPose){ alert("请先在地图上点选位置"); return; }
+  if (!state.meta){ return; }
+  const yaw = (parseFloat($("pose-yaw").value) || 0) * Math.PI / 180;
+  wsSend({type:"slam", op:"set_initial_pose", name: state.meta.name,
+          x: state.pickedPose.x, y: state.pickedPose.y, yaw});
+  $("pose-picked").textContent = "已发送，正在重新定位…（约 10-30 秒）";
+  setTimeout(()=>loadMapList(), 12000);
+});
+
+$("pose-yaw").addEventListener("input", ()=>draw());
+
+// ---------- WebSocket：拿实时位姿/扫描 ----------
+function connectWS(){
+  const proto = location.protocol === "https:" ? "wss" : "ws";
+  state.ws = new WebSocket(`${proto}://${location.host}/ws`);
+  state.ws.onopen = ()=>{ $("conn").textContent = "● 已连接"; $("conn").style.color = "var(--ok)"; };
+  state.ws.onclose = ()=>{ $("conn").textContent = "● 已断开，重连中…"; $("conn").style.color = "var(--danger)";
+                           setTimeout(connectWS, 2000); };
+  state.ws.onerror = ()=> state.ws.close();
+  state.ws.onmessage = (ev)=>{
+    let m; try{ m = JSON.parse(ev.data); }catch{ return; }
+    if (m.type !== "state") return;
+    state.slam = m.slam || {mode:"off"};
+    state.slam.quality = (m.slam && m.slam.quality) || null;
+    state.slam.quality_ok = m.slam ? m.slam.quality_ok : true;
+    state.pos = m.pos ? {x:m.pos[0], y:m.pos[1]} : state.pos;
+    state.yaw = m.yaw || 0;
+    // 后端在定位时提供 map 系位姿（见 app.py 的 robot_map 字段）
+    state.robotMap = m.robot_map || null;
+    if (state.slam.mode === "localization" && state.slam.map &&
+        state.meta && state.slam.map === state.meta.name && !state.robotMap){
+      // 兜底：没有 map 位姿就不画，避免画错位置
+      state.robotMap = null;
+    }
+    draw();
+  };
+}
+
+let loading = false;
+(async function init(){
+  syncOpts();
+  resize();
+  await loadMapList();
+  const name = $("map-select").value;
+  if (name) await selectMap(name);
+  connectWS();
+})();
+
+window.addEventListener("resize", resize);
+</script>
+</body>
+</html>

@@ -35,6 +35,27 @@
   }
   .big-btn:active { transform: scale(.98); }
   .sec-title { width: 100%; color: var(--accent); font-size: 15px; font-weight: 600; text-align: left; margin-top: 4px; }
+  /* 连接机器人入口 */
+  .connect-card {
+    width: 100%; display: flex; align-items: center; gap: 14px; cursor: pointer;
+    background: linear-gradient(135deg, rgba(74,158,255,.12), rgba(74,158,255,.03));
+    border: 1px solid rgba(74,158,255,.3); border-radius: 12px; padding: 14px 16px;
+    transition: background .15s;
+  }
+  .connect-card:active { background: linear-gradient(135deg, rgba(74,158,255,.2), rgba(74,158,255,.06)); }
+  .connect-card.online { border-color: rgba(52,211,153,.45);
+    background: linear-gradient(135deg, rgba(52,211,153,.1), rgba(52,211,153,.03)); }
+  .connect-icon {
+    width: 42px; height: 42px; border-radius: 12px; flex-shrink: 0;
+    background: rgba(74,158,255,.18); display: flex; align-items: center;
+    justify-content: center; font-size: 21px;
+  }
+  .connect-main { flex: 1; min-width: 0; }
+  .connect-main b { display: block; font-size: 15px; margin-bottom: 3px; }
+  .connect-main span { font-size: 12px; color: var(--muted); word-break: break-all; }
+  .connect-main .dot-ok { color: var(--ok); }
+  .connect-main .dot-bad { color: var(--danger); }
+  .connect-go { font-size: 13px; color: var(--accent); font-weight: 600; flex-shrink: 0; }
   .grid-2 { display: grid; grid-template-columns: 1fr 1fr; gap: 10px; width: 100%; }
   .grid-2 a, .grid-2 .grid-btn {
     display: block; width: 100%; text-align: center; padding: 14px 8px; border-radius: 10px;
@@ -59,14 +80,24 @@
     <div class="row"><span>地图点</span><b id="hm-map">0</b></div>
   </div>
 
-  <button class="big-btn" onclick="location.href='/console'">🚶 进入展厅导览控制台</button>
+  <!-- 连接机器人 -->
+  <div class="connect-card" id="card-connect">
+    <div class="connect-icon">🔗</div>
+    <div class="connect-main">
+      <b>连接机器人</b>
+      <span id="connect-sub">检测中…</span>
+    </div>
+    <span class="connect-go">去连接 ▶</span>
+  </div>
+
+  <button class="big-btn" onclick="go('/console')">🚶 进入展厅导览控制台</button>
 
   <div class="sec-title">功能入口</div>
   <div class="grid-2">
     <button class="grid-btn" id="btn-restart">🔄 重启 App</button>
-    <a href="/console">🗺️ 地图与导航</a>
-    <a href="/console">🕹️ 运动控制</a>
-    <a href="/ai">🤖 AI 控制</a>
+    <a href="/console" data-path="/console">🗺️ 地图与导航</a>
+    <a href="/motion" data-path="/motion">🕹️ 运动模式</a>
+    <a href="/ai" data-path="/ai">🤖 AI 控制</a>
   </div>
 
   <div class="footer">SCAN-Planner · Go2 X · ROS2 Humble</div>
@@ -76,6 +107,41 @@
 // main panel: show robot status via WebSocket (read-only dashboard)
 const $ = (id) => document.getElementById(id);
 let ws = null;
+
+// ---- 后端地址：连接向导保存的 IP 优先（保存后整块面板指向该地址）----
+const SAVED_IP = localStorage.getItem("go2_server_ip") || "";
+const BACKEND = (SAVED_IP && SAVED_IP !== location.hostname) ? "http://" + SAVED_IP : "";
+function go(path) { location.href = BACKEND + path; }
+document.querySelectorAll("a[data-path]").forEach((a) => {
+  a.href = BACKEND + a.dataset.path;
+});
+
+// ---- 连接机器人入口 ----
+$("card-connect").addEventListener("click", () => { location.href = "/connect"; });
+(function paintConnect() {
+  const sub = $("connect-sub");
+  if (!SAVED_IP) {
+    sub.textContent = "当前面板地址 " + location.host + "，未保存其他地址";
+    return;
+  }
+  if (SAVED_IP === location.hostname) {
+    sub.innerHTML = '<span class="dot-ok">● 已连接</span> ' + SAVED_IP;
+    $("card-connect").classList.add("online");
+    return;
+  }
+  sub.textContent = "已保存后端 " + SAVED_IP + "，探测中…";
+  fetch("http://" + SAVED_IP + "/api/net/status", { cache: "no-store" })
+    .then((r) => r.json())
+    .then((d) => {
+      if (d && d.ok) {
+        sub.innerHTML = '<span class="dot-ok">● 已连接</span> ' + SAVED_IP;
+        $("card-connect").classList.add("online");
+      } else {
+        sub.innerHTML = '<span class="dot-bad">● 不可达</span> ' + SAVED_IP;
+      }
+    })
+    .catch(() => { sub.innerHTML = '<span class="dot-bad">● 不可达</span> ' + SAVED_IP; });
+})();
 function connect() {
   const proto = location.protocol === "https:" ? "wss" : "ws";
   ws = new WebSocket(`${proto}://${location.host}/ws`);

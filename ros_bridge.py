@@ -8,17 +8,22 @@ This file lives entirely inside hu/go2/web and talks to the already-running
 SCAN-Planner stack over standard ROS2 topics.
 """
 
+import json
 import math
+import os
+import sys
 import threading
+import time
 
 import rclpy
 from rclpy.node import Node
 from rclpy.qos import QoSProfile, ReliabilityPolicy, HistoryPolicy, DurabilityPolicy
 
-from sensor_msgs.msg import PointCloud2, PointField
+from sensor_msgs.msg import LaserScan, PointCloud2, PointField
 from nav_msgs.msg import Odometry
 from geometry_msgs.msg import PoseStamped, Twist
 from std_msgs.msg import Bool
+from tf2_msgs.msg import TFMessage
 from unitree_api.msg import Request
 
 # Sport API ids (mirror of ros2_sport_client.h)
@@ -41,6 +46,16 @@ SPORT_DANCE1 = 1022
 SPORT_DANCE2 = 1023
 SPORT_POSE = 1028
 SPORT_FREEWALK = 2045
+SPORT_FREEBOUND = 2046
+SPORT_FREEJUMP = 2047
+SPORT_FREEAVOID = 2048
+SPORT_CLASSICWALK = 2049
+SPORT_WALKUPRIGHT = 2050
+SPORT_CROSSSTEP = 2051
+SPORT_BODYHEIGHT = 2056
+# 爬楼梯：官方 sports_services 文档有 WalkStair(bool)，但未公布 api_id，
+# 且 1.23 固件上 2052/2057 等候选都回 3203（未知 api_id）。所以本页面
+# 的爬楼按钮走「探测 + 明确报错」路径，而不是假装成功。
 
 # Exhibit actions: name -> (api_id, default duration seconds, label)
 # Per official Unitree sports_services docs:
@@ -58,10 +73,52 @@ EXHIBIT_ACTIONS = {
     "balance": (SPORT_BALANCESTAND, 3.0, "⚖️ 平衡站"),
 }
 
+# 运动模式页专用动作表：name -> (api_id, 是否带 bool 参数, 目标开关状态, 说明)
+# bool 参数的 API 用 {"data": true/false} 下发（见 ros2_sport_client.cpp）。
+#
+# 灵动模式（FreeWalk, 2045）在 Go2 上是一次性「进入自由行走」命令，不带参数，
+# 进入后由底层自主选步态，本身就能上下楼梯，不需要单独的爬楼接口。
+# 退出灵动回普通站立用 StandUp，所以它不算 bool 型模式。
+MOTION_ACTIONS = {
+    "hello": (SPORT_HELLO, False, None, "打招呼"),
+    "sit": (SPORT_SIT, False, None, "坐下"),
+    "risesit": (SPORT_RISESIT, False, None, "站起"),
+    "stretch": (SPORT_STRETCH, False, None, "伸懒腰"),
+    "scrape": (SPORT_SCRAPE, False, None, "拜年作揖"),
+    "dance1": (SPORT_DANCE1, False, None, "舞蹈段落1"),
+    "dance2": (SPORT_DANCE2, False, None, "舞蹈段落2"),
+    "heart": (SPORT_HEART, False, None, "比心"),
+    "freewalk": (SPORT_FREEWALK, False, None, "灵动模式"),
+    # 下列为「进入/退出」型模式：true 进入，false 退出回灵动模式
+    "walkupright": (SPORT_WALKUPRIGHT, True, True, "后腿直立模式"),
+    "crossstep": (SPORT_CROSSSTEP, True, True, "交叉步模式"),
+    "freebound": (SPORT_FREEBOUND, True, True, "并腿跑模式"),
+    "freejump": (SPORT_FREEJUMP, True, True, "跳跃模式"),
+    "freeavoid": (SPORT_FREEAVOID, True, True, "闪避模式"),
+    "classicwalk": (SPORT_CLASSICWALK, True, True, "经典步态"),
+    "pose": (SPORT_POSE, True, True, "摆姿势"),
+}
+
+# 退出型模式 -> api_id，用于「一键退出所有模式」与互斥切换
+BOOL_MODES = {name: (api, desc) for name, (api, is_bool, _on, desc)
+              in MOTION_ACTIONS.items() if is_bool}
+# 互斥模式组：同一时刻只允许一个「灵动子模式」处于开启状态
+EXCLUSIVE_MODES = ("walkupright", "crossstep", "freebound", "freejump",
+                   "freeavoid", "classicwalk", "pose")
+
+
 RELIABLE_QOS = QoSProfile(
     reliability=ReliabilityPolicy.RELIABLE,
     history=HistoryPolicy.KEEP_LAST,
     depth=10,
+    durability=DurabilityPolicy.VOLATILE,
+)
+
+# pointcloud_to_laserscan 以 BEST_EFFORT 发布 /scan，订阅必须匹配，否则收不到
+SENSOR_QOS = QoSProfile(
+    reliability=ReliabilityPolicy.BEST_EFFORT,
+    history=HistoryPolicy.KEEP_LAST,
+    depth=5,
     durability=DurabilityPolicy.VOLATILE,
 )
 
@@ -72,7 +129,10 @@ def _pointcloud2_to_points(msg, max_points=4000):
     if "x" not in fields or "y" not in fields:
         return []
     step = msg.point_step
-    data = msg.data
+    # 段错误修复(2026-10-17, 见 web.log): msg.data 是 rclpy C 层消息内存的视图,
+    # spin 线程解析期间底层缓冲可能被回收, struct.unpack_from 随之段错误。
+    # 先拷到 Python 堆上再读, 拷贝代价远小于一次崩溃。
+    data = bytes(msg.data)
     n = msg.width * msg.height
     if n == 0:
         return []
@@ -98,6 +158,173 @@ def _read_float(data, offset):
     return struct.unpack_from("<f", data, offset)[0]
 
 
+class TfFilter:
+    """map->odom 平滑器：把 slam_toolbox 的逐帧重解噪声压成缓慢修正。
+
+    背景：slam_toolbox 的 localization 模式每帧都会重新求解绝对位姿并直接
+    写进 map->odom。展厅是开放展台结构、特征稀疏，配准时存在大量"看起来
+    都合理"的解，实测 map->odom 每 3 秒跳 0.76m（累计跳变位移甚至超过机器人
+    自身走过的路程），导致 map 系下的机器人位置随机乱跳、导览目标点漂移。
+
+    这里不改 slam_toolbox 的输出，只在消费侧做三道限制：
+
+    1. 限速：每帧最多采纳 MAX_STEP_M / MAX_STEP_YAW 的变化，多余的留到后续
+       帧慢慢消化 —— 把跳变磨成平滑过渡。
+    2. 拒绝孤立跳变：单帧变化超过 JUMP_M / JUMP_YAW 视为误匹配，直接丢弃
+       （不更新状态），除非同一方向持续出现（见 3）。
+    3. 持续偏离才采纳：连续 PERSIST_S 秒、且每次都在相近方向偏离，说明是
+       真实漂移而非噪声，此时放开跳变拒绝，逐步跟上。
+
+    参数与场地尺度无关：约束的是"单次修正上限"和"持续性判据"，40m 展厅
+    和 4m 办公室同样适用。
+    """
+    MAX_STEP_M = 0.15         # 每帧（约 10Hz）最多移动 15cm -> 上限 1.5 m/s
+    MAX_STEP_YAW = math.radians(8.0)
+    JUMP_M = 0.50             # 单帧超过 50cm 视为可疑跳变
+    JUMP_YAW = math.radians(20.0)
+    # "持续同向偏离"才认定是真实漂移。判据要严：跳变本身每 3 秒一次、
+    # 方向随匹配噪声乱变，若用 1.5s/0.25m 这种松阈值，几乎每次跳变都会被
+    # 当成真实漂移放行，滤波等于没用（实测只有 3 倍改善）。改成：
+    # 至少持续 4s、累计同向偏移 >= 0.8m、且期间每次偏移方向一致。
+    PERSIST_S = 4.0
+    PERSIST_M = 0.8
+    PERSIST_DIR_COS = 0.7     # 相邻偏移方向夹角余弦 > 0.7 才算"同向"
+    UNSTABLE_WINDOW = 10.0    # 不稳定判定的滑动窗口
+    UNSTABLE_COUNT = 8        # 窗口内跳变次数超过这个 -> 判为不稳定
+
+    def __init__(self):
+        self.value = None             # 平滑后的 (x, y, yaw)
+        self._raw = None              # 最近一次原始值（用于偏离判据）
+        self._rstamp = 0.0
+        self._rejects = 0             # 连续拒绝次数
+        self._reject_dir = None       # 连续拒绝的累计方向
+        self._last_off = None         # 上一次偏移向量（判同向）
+        self._reject_since = 0.0
+        self._jump_times = []         # 近期疑似跳变的时间戳
+        self._last_apply = 0.0
+        self.stats = {"accepted": 0, "rejected": 0, "clipped": 0,
+                      "jumps": 0, "persisted": 0}
+
+    # ---- 数学小工具 ----
+    @staticmethod
+    def _wrap(a):
+        return math.atan2(math.sin(a), math.cos(a))
+
+    @staticmethod
+    def _dist(a, b):
+        return math.hypot(a[0] - b[0], a[1] - b[1])
+
+    def _is_unstable(self, now):
+        # 只能在这里裁剪：unstable_count() 是纯查询，不能有副作用
+        self._jump_times = [t for t in self._jump_times
+                            if now - t <= self.UNSTABLE_WINDOW]
+        return len(self._jump_times) >= self.UNSTABLE_COUNT
+
+    def unstable(self, now=None):
+        return self._is_unstable(now if now is not None else time.time())
+
+    def unstable_count(self, now=None):
+        """近 UNSTABLE_WINDOW 秒内的跳变次数（只读，不改状态）。
+
+        注意：这里必须自己过滤时间窗口，不能依赖 _jump_times 已被裁剪——
+        _is_unstable() 才有裁剪副作用，而状态广播会以 10Hz 调本函数。
+        """
+        now = now if now is not None else time.time()
+        return len([t for t in self._jump_times
+                    if now - t <= self.UNSTABLE_WINDOW])
+
+    def push(self, raw, now=None):
+        """送入一帧原始 map->odom(dx, dy, yaw)，返回平滑后应使用的值。"""
+        now = now if now is not None else time.time()
+        raw = (float(raw[0]), float(raw[1]), float(raw[2]))
+        self._raw = raw
+        self._rstamp = now
+
+        if self.value is None:
+            # 首帧（或刚启动定位）直接采纳，作为基准
+            self.value = raw
+            self._last_apply = now
+            self.stats["accepted"] += 1
+            return self.value
+
+        dpos = self._dist(raw, self.value)
+        dyaw = abs(self._wrap(raw[2] - self.value[2]))
+
+        # ---- 2. 疑似跳变 ----
+        if dpos > self.JUMP_M or dyaw > self.JUMP_YAW:
+            self.stats["jumps"] += 1
+            self._jump_times.append(now)
+            off_x, off_y = raw[0] - self.value[0], raw[1] - self.value[1]
+            off_len = math.hypot(off_x, off_y)
+            same_dir = True
+            if self._reject_dir is not None and self._last_off is not None:
+                prev_len = math.hypot(*self._last_off)
+                if prev_len > 1e-6 and off_len > 1e-6:
+                    cosang = ((self._last_off[0] * off_x
+                               + self._last_off[1] * off_y)
+                              / (prev_len * off_len))
+                    same_dir = cosang >= self.PERSIST_DIR_COS
+            if self._reject_dir is None or not same_dir:
+                # 方向变了 -> 重新开始累计（说明是抖动，不是漂移）
+                self._reject_dir = (off_x, off_y)
+                self._reject_since = now
+            else:
+                self._reject_dir = (self._reject_dir[0] + off_x,
+                                    self._reject_dir[1] + off_y)
+            self._last_off = (off_x, off_y)
+            acc = math.hypot(*self._reject_dir)
+            # ---- 3. 持续同向偏离 -> 认定真实漂移，放开限制 ----
+            if (now - self._reject_since >= self.PERSIST_S
+                    and acc >= self.PERSIST_M):
+                self.stats["persisted"] += 1
+                # 真实漂移：直接跳到新基准（但保留限速，避免一次性瞬移）
+                self.value = self._clip_toward(self.value, raw)
+                self._rejects = 0
+                self._reject_dir = None
+                self._last_off = None
+                self._last_apply = now
+                self.stats["accepted"] += 1
+                return self.value
+            self.stats["rejected"] += 1
+            self._rejects += 1
+            return self.value
+
+        # ---- 1. 正常范围内：限速逼近 ----
+        self._rejects = 0
+        self._reject_dir = None
+        self._last_off = None
+        new = self._clip_toward(self.value, raw)
+        if self._dist(new, raw) > 1e-4 or abs(self._wrap(new[2] - raw[2])) > 1e-4:
+            self.stats["clipped"] += 1
+        else:
+            self.stats["accepted"] += 1
+        self.value = new
+        self._last_apply = now
+        return self.value
+
+    def _clip_toward(self, cur, target):
+        """朝 target 移动，但单帧不超过 MAX_STEP_M / MAX_STEP_YAW。"""
+        dx, dy = target[0] - cur[0], target[1] - cur[1]
+        d = math.hypot(dx, dy)
+        if d > self.MAX_STEP_M:
+            k = self.MAX_STEP_M / d
+            dx, dy = dx * k, dy * k
+        dyaw = self._wrap(target[2] - cur[2])
+        if abs(dyaw) > self.MAX_STEP_YAW:
+            dyaw = math.copysign(self.MAX_STEP_YAW, dyaw)
+        return (cur[0] + dx, cur[1] + dy, self._wrap(cur[2] + dyaw))
+
+    def reset(self, value=None):
+        self.value = value
+        self._raw = value
+        self._rstamp = time.time() if value is not None else 0.0
+        self._rejects = 0
+        self._reject_dir = None
+        self._last_off = None
+        self._reject_since = 0.0
+        self._jump_times = []
+
+
 class RosBridge(Node):
     """ROS2 node bridging robot topics to the web layer."""
 
@@ -114,6 +341,7 @@ class RosBridge(Node):
         self.position = (0.0, 0.0, 0.0)
         self.yaw = 0.0
         self.odom_stamp = 0.0
+        self.odom_receive_time = 0.0
         self.planner_alive = False
         self.planner_stamp = 0.0
 
@@ -122,7 +350,7 @@ class RosBridge(Node):
             PointCloud2, topics.get("map", "/grid_map/occupancy"),
             self._map_cb, RELIABLE_QOS)
         self._odom_sub = self.create_subscription(
-            Odometry, topics.get("odom", "/utlidar/robot_odom"),
+            Odometry, topics.get("odom", "/sportmodestate_odom"),
             self._odom_cb, RELIABLE_QOS)
 
         # ---- publishers ----
@@ -135,6 +363,51 @@ class RosBridge(Node):
         # Pause signal for the bridge (so it stops overriding exhibit actions)
         self._pause_pub = self.create_publisher(
             Bool, topics.get("motion_pause", "/go2/motion_pause"), 10)
+
+        # ---- SLAM 定位层（slam_toolbox 在 /tf 上发 map->odom）----
+        # 定位激活时，点位的持久化与导览都以 map 系为准；本节点只负责
+        # 维护 map<->odom 的 2D 换算，app 层决定何时使用。
+        self.slam_mode = "off"          # off | mapping | localization（app 层写）
+        self.slam_map = ""              # 当前地图名（app 层写）
+        self._map_odom = None           # 原始 map->odom（最后收到的）
+        self._map_odom_stamp = 0.0
+        self._tf_filter = TfFilter()    # 平滑后的 map->odom，供 app 层使用
+        self.create_subscription(TFMessage, "/tf", self._tf_cb, 10)
+
+        # 持久地图栅格（slam_toolbox 在定位/建图时发布 /map），
+        # 用于网页把"稳定地图"画成背景
+        self._static_map = None   # (width, height, resolution, origin, bytes, stamp)
+        try:
+            from nav_msgs.msg import OccupancyGrid
+            self.create_subscription(OccupancyGrid, "/map", self._grid_cb, 10)
+        except ImportError:
+            OccupancyGrid = None
+
+        # 最近一帧 /scan，供 app 层做定位置信度自检（扫描 vs 地图匹配残差）
+        self._last_scan = None
+        self.create_subscription(
+            LaserScan, topics.get("scan", "/scan"), self._scan_cb, SENSOR_QOS)
+
+        # 运动状态（mode/gait/error_code）：运动模式页用来显示当前模式与
+        # 下发指令后的真实回执。低频话题即可，动作反馈另有 response 订阅。
+        self.sport_state = {}
+        try:
+            from unitree_go.msg import SportModeState
+            self.create_subscription(
+                SportModeState, topics.get("sport_state", "/lf/sportmodestate"),
+                self._sport_state_cb, SENSOR_QOS)
+        except ImportError:
+            self.get_logger().warn("unitree_go not importable; sport state off")
+
+        # 运动指令回执：未知 api_id 回 3203、参数错回 3202，界面据此报错，
+        # 不再把「发出去」当成「成功了」。
+        self.last_sport_resp = None
+        try:
+            from unitree_api.msg import Response
+            self.create_subscription(Response, "/api/sport/response",
+                                     self._sport_resp_cb, 10)
+        except ImportError:
+            pass
 
         self.get_logger().info("ROS bridge ready")
 
@@ -156,20 +429,185 @@ class RosBridge(Node):
             self.position = (p.x, p.y, p.z)
             self.yaw = yaw
             self.odom_stamp = self._now_sec(msg.header.stamp)
+            self.odom_receive_time = time.time()
 
     @staticmethod
     def _now_sec(stamp):
         return stamp.sec + stamp.nanosec * 1e-9
 
+    def _grid_cb(self, msg):
+        """缓存 slam_toolbox 的 /map 栅格（-1=未知 0=空 100=占用）。"""
+        info = msg.info
+        data = bytes(msg.data)
+        with self._lock:
+            self._static_map = (info.width, info.height, info.resolution,
+                                info.origin.position.x, info.origin.position.y,
+                                data, time.time())
+
+    def static_map(self):
+        with self._lock:
+            return self._static_map
+
+    def _scan_cb(self, msg):
+        with self._lock:
+            self._last_scan = (list(msg.ranges), msg.angle_min,
+                               msg.angle_increment, msg.range_min, msg.range_max)
+
+    def _sport_state_cb(self, msg):
+        with self._lock:
+            self.sport_state = {
+                "mode": int(msg.mode),
+                "gait_type": int(msg.gait_type),
+                "error_code": int(msg.error_code),
+                "body_height": round(float(msg.body_height), 3),
+                "foot_raise_height": round(float(msg.foot_raise_height), 3),
+                "progress": round(float(msg.progress), 2),
+                "stamp": self._now_sec(msg.stamp),
+            }
+
+    def _sport_resp_cb(self, msg):
+        with self._lock:
+            self.last_sport_resp = {
+                "api_id": int(msg.header.identity.api_id),
+                "code": int(msg.header.status.code),
+                "data": msg.data,
+                "ts": time.time(),
+            }
+
+    def _tf_cb(self, msg):
+        for t in msg.transforms:
+            if t.header.frame_id == "map" and t.child_frame_id == "odom":
+                tr = t.transform.translation
+                q = t.transform.rotation
+                yaw = math.atan2(
+                    2.0 * (q.w * q.z + q.x * q.y),
+                    1.0 - 2.0 * (q.y * q.y + q.z * q.z),
+                )
+                now = time.time()
+                with self._lock:
+                    self._map_odom = (tr.x, tr.y, yaw)
+                    self._map_odom_stamp = now
+                    # 平滑后的值才是 app/导览真正使用的 map->odom
+                    smooth = self._tf_filter.push((tr.x, tr.y, yaw), now)
+                # 存盘用平滑值：重启后恢复的基准与运行中一致
+                self._save_last_tf(smooth)
+
+    def _save_last_tf(self, tf):
+        """把 map->odom 存盘：重启后即使定位没开，也能继续用 map 系显示点位。"""
+        now = time.time()
+        if now - getattr(self, "_tf_save_ts", 0) < 10.0:
+            return
+        self._tf_save_ts = now
+        try:
+            p = self.cfg.get("slam", {}).get("last_tf_file") or \
+                "/home/unitree/hu/go2/web/slam_last_tf.json"
+            with open(p, "w") as f:
+                json.dump({"map": self.cfg.get("slam", {}).get("last_map", ""),
+                           "tf": [round(v, 5) for v in tf],
+                           "ts": int(now)}, f)
+        except OSError:
+            pass
+
+    def load_last_tf(self):
+        """启动时载入上次保存的 map->odom。"""
+        try:
+            p = self.cfg.get("slam", {}).get("last_tf_file") or \
+                "/home/unitree/hu/go2/web/slam_last_tf.json"
+            with open(p) as f:
+                d = json.load(f)
+            tf = d.get("tf")
+            if tf and len(tf) == 3:
+                with self._lock:
+                    self._map_odom = tuple(float(v) for v in tf)
+                    self._map_odom_stamp = 0.0  # 标记为非实时
+                    # 平滑器以存盘值为起点，避免重启后第一次匹配被当成跳变
+                    self._tf_filter.reset(tuple(float(v) for v in tf))
+                self.get_logger().info(f"loaded last map->odom {tf}")
+        except (OSError, ValueError):
+            pass
+
+    # ---------- map <-> odom 换算（2D, yaw 用 atan2 包装） ----------
+    def slam_tf(self, max_age=5.0):
+        """返回平滑后的 map->odom (x, y, yaw)；过期或不存在返回 None。"""
+        with self._lock:
+            if (self._tf_filter.value is None
+                    or time.time() - self._map_odom_stamp > max_age):
+                return None
+            return self._tf_filter.value
+
+    def slam_tf_raw(self):
+        """最后收到的原始 map->odom（诊断用，不要用于换算）。"""
+        with self._lock:
+            return self._map_odom
+
+    def slam_tf_last(self):
+        """返回最后一次已知的平滑 map->odom（忽略时效）。
+
+        用户手动停止定位后，点位仍以 map 系保存与显示；此时没有新的
+        TF，就用最后已知值换算，避免整批点位跳回旧坐标系。
+        """
+        with self._lock:
+            return self._tf_filter.value
+
+    def slam_stability(self):
+        """定位稳定性：unstable=True 表示近期跳变频繁，定位结果不可信。"""
+        f = self._tf_filter
+        return {"unstable": f.unstable(),
+                "jumps_recent": f.unstable_count(),
+                "stats": dict(f.stats)}
+
+    def odom_to_map(self, x, y, yaw=0.0):
+        tf = self.slam_tf()
+        if tf is None:
+            return None
+        c, s = math.cos(tf[2]), math.sin(tf[2])
+        mx = tf[0] + c * x - s * y
+        my = tf[1] + s * x + c * y
+        myaw = math.atan2(math.sin(tf[2] + yaw), math.cos(tf[2] + yaw))
+        return (mx, my, myaw)
+
+    def map_to_odom(self, x, y, yaw=0.0):
+        tf = self.slam_tf()
+        if tf is None:
+            return None
+        dx, dy = x - tf[0], y - tf[1]
+        c, s = math.cos(-tf[2]), math.sin(-tf[2])
+        ox = c * dx - s * dy
+        oy = s * dx + c * dy
+        oyaw = math.atan2(math.sin(yaw - tf[2]), math.cos(yaw - tf[2]))
+        return (ox, oy, oyaw)
+
     # ---------- snapshot for web ----------
+    def topic_publisher_count(self, topic):
+        """Return the number of currently discovered publishers for *topic*.
+
+        A process can remain alive after its DDS participant has lost the
+        network or was started with a different CycloneDDS interface.  Process
+        existence is therefore not enough to decide whether a bridge works;
+        use the ROS graph seen by this node instead.
+        """
+        try:
+            return self.count_publishers(str(topic))
+        except Exception:
+            return 0
+
     def snapshot(self):
         with self._lock:
+            tf_ok = (self._tf_filter.value is not None
+                     and time.time() - self._map_odom_stamp <= 5.0)
             return {
                 "map_points": list(self.map_points),
                 "map_stamp": self.map_stamp,
                 "position": self.position,
                 "yaw": self.yaw,
                 "odom_stamp": self.odom_stamp,
+                "odom_receive_time": self.odom_receive_time,
+                "slam_mode": self.slam_mode,
+                "slam_map": self.slam_map,
+                "slam_tf_ok": tf_ok,
+                "slam_unstable": self._tf_filter.unstable(),
+                "slam_jumps": self._tf_filter.unstable_count(),
+                "scan": self._last_scan,
             }
 
     # ---------- commands ----------
@@ -200,6 +638,15 @@ class RosBridge(Node):
             req.parameter = param
         self._sport_pub.publish(req)
         self.get_logger().info(f"sport api_id={api_id}")
+
+    def send_sport_bool(self, api_id, flag):
+        """Send a bool-parameterised sport request (WalkUpright/CrossStep/...).
+
+        The firmware expects {"data": <bool>} — the same envelope that
+        ros2_sport_client.cpp builds for every flag-taking API.
+        """
+        self.send_sport(api_id, json.dumps({"data": bool(flag)}))
+        self.get_logger().info(f"sport api_id={api_id} flag={bool(flag)}")
 
     def send_move(self, vx, vy, vyaw):
         """Send a velocity command through the sport channel (like the official
@@ -254,8 +701,20 @@ def start_bridge(cfg):
         executor.add_node(bridge)
         try:
             executor.spin()
-        except Exception as e:  # pragma: no cover
+        except BaseException as e:  # pragma: no cover
             bridge.get_logger().error(f"spin error: {e}")
+            # rclpy/CycloneDDS 崩坏时解释器内存已被写坏（表现为
+            # "XXX lineno: -38, opcode: 0" / "SystemError: unknown opcode"），
+            # 进程随后必死。与其等 systemd 看门狗 2 分钟后才发现，不如立刻
+            # 原地 re-exec 重建 DDS participant —— 只断约 2 秒。
+            # 用 os.write 而非 log.*，避免另一线程正持 logging 锁时 execv 死锁。
+            try:
+                os.write(2, ("go2web: ROS spin died (%r), re-exec to rebuild DDS\n"
+                             % (e,)).encode())
+            except Exception:
+                pass
+            os.execv(sys.executable,
+                     [sys.executable, "/home/unitree/hu/go2/web/app.py"])
         finally:
             executor.shutdown()
 

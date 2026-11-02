@@ -1,0 +1,31 @@
+[Unit]
+Description=Go2 网络模式蓝牙守护进程 (BT 切 AP/WiFi + 扫连 WiFi)
+Documentation=file:///home/unitree/hu/go2/web/bt_daemon/README.md
+After=bluetooth.service dbus.service NetworkManager.service
+Requires=bluetooth.service dbus.service
+# bluetoothd 重启会丢掉 SPP profile 注册，本进程不会自己重注册，
+# 跟着重启最省事（Restart=always 只处理自身崩溃）。
+PartOf=bluetooth.service
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory=/home/unitree/hu/go2/web/bt_daemon
+ExecStart=/usr/bin/python3 /home/unitree/hu/go2/web/bt_daemon/go2_net_btctl.py
+Restart=always
+RestartSec=3
+StandardOutput=journal
+StandardError=journal
+SyslogIdentifier=go2-net-btctl
+
+# dbus / bluetooth / bluez 库依赖
+Environment=PYTHONUNBUFFERED=1
+Environment=DBUS_SYSTEM_BUS_ADDRESS=unix:path=/var/run/dbus/system_bus_socket
+
+# 资源限制
+LimitNOFILE=65536
+LimitNPROC=4096
+
+[Install]
+WantedBy=multi-user.target

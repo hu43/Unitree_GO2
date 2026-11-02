@@ -108,6 +108,57 @@ cd ~/hu/go2/web
 
 > 后续可在每个展品点挂接解说（预留：导览到点时前端可触发语音/文案）。
 
+## 🎙️ 离线 AI 语音对话（`/ai` 模块2）
+
+机器人麦克风 → 本地识别 → 本地大模型 → 机器人扬声器，**全程离线**，可在页面顶部用总开关手动开启/关闭。
+
+- **麦克风**：订阅 DDS `/audiosender`（`unitree_go/AudioData`，50Hz、20ms Opus 单声道 16kHz），用系统 `libopus` 解码。不依赖容器里的 ALSA 采集设备（容器的 `/dev/snd` 是启动时快照）。
+- **识别**：`sherpa-onnx` + Paraformer 中文模型（`models/sherpa-onnx-paraformer-zh-2023-09-14`）。
+- **对话**：本地 Ollama（`ai.model`，默认 `gemma4:e2b-it-qat`），人设可在页面「人设 / 展品知识库」里编辑，也会自动带上各展品的讲解文字。
+- **合成**：`sherpa-onnx` VITS Melo 中文模型（`models/vits-melo-tts-zh_en`），复用现有 `ffmpeg -f alsa` 播放链路。默认**离线优先**（`ai.voice.prefer_offline`）：先本地合成，失败才试 edge-tts；edge-tts 失败后进入 5 分钟冷却，试听/导览不再每次白等 10 秒。
+- **流式解说**：解说按句切分（≤20 字），首句合成完就开始播放，后面的句子边播边合成；保存解说文字时和启动后都会在后台预合成到缓存（`audio/tts_s_*.wav`），所以试听/导览通常 1-2 秒就出声。Jetson 上 VITS 约 1 倍实时速度，首次遇到全新长文本时首句要等 4-6 秒。
+- **音量**：页面顶部「🔊 扬声器音量」滑块 0-100%（平方曲线，保存到 `ai.voice.volume`），对 AI 回复和导览解说都生效。USB 声卡混音器固定 100%；离线合成结果在写盘前归一化到 0.95 峰值，保证每句话都是满量程（模型原始输出峰值只有 0.14-0.39）。需要更响可在 `ai.voice.gain_db` 设 3-6（数字放大 + `alimiter` 限幅，会压缩动态），默认 0。
+- **用法**：按住「🎤 按住说话」说话，松开（或静音 0.8s）自动结束；也可以直接打字。
+- **总开关**：关闭后后端拒绝所有 AI/语音/Agent 请求，并调用 Ollama `keep_alive:0` 卸载模型（释放约 4GB 内存）；重新打开即恢复。
+
+安装依赖与模型（首次部署）：
+
+```bash
+cd ~/hu/go2/web
+./install_ai.sh          # 容器内 pip 安装 sherpa-onnx + 从 hf-mirror 下载模型
+```
+
+## 🧠 智能 AI 控制（`/ai` 模块3）
+
+自研 Ollama 工具调用 Agent（`agent.py`）：把 DDS 运控、摄像头、激光雷达、导航包装成工具，由本地模型自主编排。LLM 只负责选工具/看结果/说结论，闭环动作在 Python 里确定性执行。
+
+**工具清单**
+
+| 类别 | 工具 |
+|---|---|
+| 运控 | `robot_status` `stand_up` `sit` `damp` `balance_stand` `stop_move` `move` `turn` |
+| 视觉 | `look`（抓帧+VLM 描述）`find_color`（颜色检测）`walk_to_color`（走到色块前）`follow_person`（跟随人） |
+| 雷达 | `lidar_clearances`（前后左右最近障碍） |
+| 导航 | `list_waypoints` `goto_waypoint`（SCAN-Planner 自主避障）`remember_place` |
+| 其它 | `speak` `emergency_stop` |
+
+**示例任务**（页面快捷按钮已内置）
+
+- 走到蓝色方块那里 → `walk_to_color`：HSV 色块检测 + 视觉伺服（对准→前进→面积达标停），丢失 8s 放弃。
+- 跟着我走30秒 → `follow_person`：YOLOX 行人检测（`models/yolox_s.onnx`，416 输入，Orin 上约 0.28s/帧），居中转向 + **雷达窄前向距离控距**（默认目标 0.75m，0.65~0.85m 保持、更远前进、更近后退；雷达无读数时退回框高估算），人消失 1.5s 自动停。目标距离可改 `agent.follow_distance`。机器狗视角低，人靠近时画面里只有腿，HOG 全身检测会失效，所以用 YOLOX；模型缺失时自动退回 HOG。
+- 看看前方有什么 → `look`：前视相机 + 视觉模型描述。
+- 把这里记成老板办公室 → `remember_place`；之后「去老板办公室」会调 `goto_waypoint`（需要 SCAN-Planner 在跑，未运行会自动启动）。
+  - Go2 没有机械臂，物理「取东西」做不到，只能到点、观察、播报。
+
+**摄像头**：容器内直接向 `/api/videohub/request` 发 `api_id=1001` 请求，响应 `Response.binary` 即 JPEG，5Hz 缓存在内存（`/api/ai/frame.jpg` 可看缩略图）。不再需要主机侧抓帧进程。
+
+**安全边界（写死在 Python 侧，LLM 无法绕过）**
+
+- 单任务互斥；任务上限 180s，单次 `move` ≤3s，速度上限取 `agent.max_speed` 与全局 `max_speed` 的较小值。
+- 运动前自动停导览、释放摇杆锁、趴下时自动站起；所有运动路径 `finally` 归零 + `StopMove`。
+- 运动看门狗：超过本次动作截止时间仍在动，立即归零并取消任务。
+- 页面「⏹ 停止」「⛔ 急停」都会立即取消 Agent；发起任务的页面断开连接也会取消并归零。
+
 ## 配置说明（config.json）
 
 | 键 | 默认 | 说明 |
@@ -119,10 +170,28 @@ cd ~/hu/go2/web
 | `reach_threshold` | 0.4 | 导览到达判定距离（米） |
 | `max_speed` | 0.5 | 摇杆最大速度（米/秒） |
 | `waypoints` | — | 展品点位数组（网页可增删改） |
+| `ai.enabled` | `true` | 离线 AI 总开关（页面顶部可切，关闭时卸载模型） |
+| `ai.model` / `ai.vision_model` | `gemma4:e2b-it-qat` | 对话/视觉模型（需支持 tools；`gemma3:4b` 不支持工具调用） |
+| `ai.system_prompt` | 空 | 人设，页面可编辑 |
+| `ai.inject_waypoints` | `true` | 自动把展品讲解拼进对话上下文 |
+| `ai.voice.*` | — | 语音模型名、VAD 门限、静音时长、最长一句话 |
+| `agent.max_speed` | 0.3 | Agent 限速（页面滑块可调） |
+| `agent.max_steps` | 12 | 工具调用最大步数 |
+| `agent.max_move_s` | 3.0 | 单次 move 最长秒数 |
+| `agent.follow_distance` | 0.75 | 跟随目标距离（米），雷达控距 |
 
 ## 常见问题
 
 - **页面连不上（红色未连接）**：确认 SCAN-Planner 在跑、后端启动了、手机与机器人在同一网络
 - **地图空白**：等 SCAN-Planner 建图几秒；确认 `/grid_map/occupancy` 有数据（`ros2 topic hz /grid_map/occupancy`）
+- **网页地图点击没反应**：导航点击请使用 `/console` 的「设目标」模式；`/mapview` 是查看器，普通点击不会发送导航目标。确认 `navi_mode=1`，并检查 `/sportmodestate` 与 `/sportmodestate_odom` 都有数据（`ros2 topic hz /sportmodestate`、`ros2 topic hz /sportmodestate_odom`）。两者 DDS 节点须使用同一网络接口配置；规划器日志出现 `no odom` 或 `Ignore RViz goal before receiving initial body pose` 时，目标会被丢弃。
 - **导览不动**：确认 SCAN-Planner 是 `navi_mode=1`；检查机器人在 odom 系位置与路径点距离
 - **conda 冲突**：`run_web.sh` 已自动剔除 miniconda；若手动运行用 `./venv/bin/python3 app.py`
+- **语音一直「没听清」**：先看 `/api/ai/status` 里 `mic_alive` 是否为 true（`/audiosender` 有没有数据）；Go2 内置麦克风增益由固件控制、底噪约 400，靠近机器狗说话效果最好。模型没装时识别会报错，可先打字。
+- **机器人不发声**：`/ai/status` 的 `tts_ready` 为 false 时先看 `models/vits-melo-tts-zh_en` 是否齐全（`./install_ai.sh` 可补）；edge-tts 报 403 是微软端点变更，导览解说会自动走离线合成。另外 USB 声卡重新枚举后，容器 `/dev/snd` 快照可能对不上，重启容器或 `sudo systemctl restart go2-web` 可恢复。
+- **声音还是小**：硬件混音器已 100%（`amixer -c 1 sget PCM`），合成结果也已归一化；再想更响就调 `ai.voice.gain_db`（3-6，带限幅）并重启服务，或直接用页面顶部的音量滑块。
+- **导览控制台「试听」没声音**：默认离线优先，首次合成要 3-5 秒（模型冷加载更久），之后命中缓存约 1-2 秒；`grep "TTS offline\|tts_s_" web.log` 可确认合成路径。若出现 `playback FAILED`，按上一条检查声卡。
+- **跟随找不到人**：`perception.py` 优先用 `models/yolox_s.onnx`（约 0.9 置信度能认出局部身体），模型缺失才会退回 HOG（对腿脚基本无效）。检查 `grep "person detector" web.log` 看用的是哪个检测器。
+- **Agent 说看不到画面**：`/api/ai/frame.jpg` 能出图说明相机正常；首次调用视觉模型要加载 4.6B 模型，等 1-2 分钟。`grep -i "camera:" web.log` 看抓帧失败计数。
+- **Agent 不动**：确认页面总开关和 `agent.enabled` 都开着；任务里是否明确要求移动；`robot_status` 里 `mode=0` 时第一次运动会自动站起，需要 2-3 秒。
+- **第一次 AI 回复很慢**：模型冷加载 + Jetson CPU 推理，`gemma4:e2b` 约 5-10 tok/s，属正常。关闭总开关会卸载模型，下次开启重新加载。

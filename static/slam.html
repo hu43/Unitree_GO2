@@ -1,0 +1,198 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Go2 SLAM 建图</title>
+<link rel="stylesheet" href="style.css">
+<style>
+  body { overflow: auto; }
+  #slam-page {
+    max-width: 860px; margin: 0 auto; padding: 12px 14px 40px;
+    display: flex; flex-direction: column; gap: 12px;
+  }
+  .sl-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+  .sl-head h1 { font-size: 19px; font-weight: 700; }
+
+  .sl-status {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(134px, 1fr));
+    gap: 8px; padding: 12px; border-radius: 10px;
+    background: var(--card); border: 1px solid #2a3550; font-size: 13px;
+  }
+  .sl-status .k { color: var(--muted); font-size: 12px; }
+  .sl-status .v { font-weight: 600; }
+  .sl-status .v.ok { color: var(--ok); }
+  .sl-status .v.warn { color: var(--warn); }
+  .sl-status .v.bad { color: var(--danger); }
+
+  .sl-card {
+    padding: 12px; border-radius: 10px;
+    background: var(--card); border: 1px solid #2a3550;
+    display: flex; flex-direction: column; gap: 10px;
+  }
+  .sl-card h2 { font-size: 14px; color: var(--accent); font-weight: 600; }
+  .sl-card .sub { font-size: 12px; color: var(--muted); margin-top: -4px; line-height: 1.6; }
+
+  .sl-map-card {
+    padding: 0; border-radius: 10px; overflow: hidden;
+    background: var(--card); border: 1px solid #2a3550;
+    display: flex; flex-direction: column;
+  }
+  .sl-map-tools {
+    display: flex; align-items: center; gap: 6px;
+    padding: 8px 10px; border-bottom: 1px solid #2a3550; flex-wrap: wrap;
+  }
+  .sl-map-tools .hint { flex: 1; min-width: 140px; font-size: 12px; color: var(--muted); }
+  .sl-tool {
+    padding: 6px 10px; border-radius: 6px; border: 1px solid #33415e;
+    background: var(--card2); color: var(--fg); cursor: pointer;
+    font-size: 13px; font-family: inherit; white-space: nowrap;
+  }
+  .sl-tool.active { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .sl-tool:active { transform: scale(.96); }
+
+  #cv {
+    width: 100%; height: 46vh; min-height: 240px; display: block;
+    background: #0b0f18; touch-action: none; cursor: grab;
+  }
+  #cv.dragging { cursor: grabbing; }
+  #cv.picking { cursor: crosshair; }
+
+  .sl-grid-2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr)); gap: 8px; }
+  .sl-btn {
+    padding: 13px 8px; border-radius: 9px; border: 1px solid #33415e;
+    background: var(--card2); color: var(--fg); font-size: 13px; cursor: pointer;
+    font-family: inherit; line-height: 1.35;
+  }
+  .sl-btn:active { transform: scale(.97); background: #2c3a5c; }
+  .sl-btn:disabled { opacity: .4; cursor: not-allowed; }
+  .sl-btn.primary { background: #17324d; border-color: var(--accent); color: #cfe6ff; }
+  .sl-btn.danger { background: #3a2020; border-color: #7a3030; color: var(--danger); }
+
+  .sl-row { display: flex; gap: 8px; align-items: center; flex-wrap: wrap; }
+  .sl-row > * { min-width: 0; }
+  .sl-input, .sl-select {
+    flex: 1; min-width: 120px; padding: 9px 10px; border-radius: 8px;
+    border: 1px solid #33415e; background: var(--card2); color: var(--fg);
+    font-size: 13px; font-family: inherit;
+  }
+  .sl-input.small { flex: 0 0 84px; min-width: 84px; }
+
+  .sl-log {
+    min-height: 44px; max-height: 130px; overflow-y: auto;
+    padding: 8px 10px; border-radius: 8px; background: #121a2c;
+    font-size: 12px; line-height: 1.7; color: var(--muted);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  .sl-log .ok { color: var(--ok); }
+  .sl-log .err { color: var(--danger); }
+  .sl-log .info { color: var(--warn); }
+
+  .sl-wp-list { list-style: none; display: flex; flex-direction: column; gap: 4px; max-height: 200px; overflow-y: auto; }
+  .sl-wp-list li {
+    display: flex; gap: 10px; align-items: baseline;
+    padding: 6px 8px; border-radius: 6px; background: #121a2c; font-size: 12.5px;
+  }
+  .sl-wp-list .id { color: var(--accent); font-weight: 600; min-width: 34px; }
+  .sl-wp-list .nm { flex: 1; color: var(--fg); }
+  .sl-wp-list .xy { color: var(--muted); font-family: ui-monospace, monospace; font-size: 11.5px; }
+
+  .sl-note {
+    font-size: 12px; color: var(--muted); line-height: 1.7;
+    padding: 10px; border-radius: 8px; background: #121a2c;
+    border-left: 3px solid var(--warn);
+  }
+  .sl-note b { color: var(--warn); }
+</style>
+</head>
+<body>
+<div id="slam-page">
+  <div class="sl-head">
+    <h1>🧭 SLAM 建图</h1>
+    <div style="display:flex;align-items:center;gap:10px">
+      <div class="conn" id="conn">● 未连接</div>
+      <button class="home-btn" onclick="location.href='/'">🏠 返回主面板</button>
+    </div>
+  </div>
+
+  <div class="sl-status">
+    <div><div class="k">里程计（狗）</div><div class="v" id="sl-odom">-</div></div>
+    <div><div class="k">SLAM 状态</div><div class="v" id="sl-mode">-</div></div>
+    <div><div class="k">当前地图</div><div class="v" id="sl-map">-</div></div>
+    <div><div class="k">map→odom</div><div class="v" id="sl-tf">-</div></div>
+    <div><div class="k">匹配偏差</div><div class="v" id="sl-quality">-</div></div>
+    <div><div class="k">定位稳定性</div><div class="v" id="sl-stab">-</div></div>
+  </div>
+
+  <!-- 地图画布 -->
+  <section class="sl-map-card">
+    <div class="sl-map-tools">
+      <button class="sl-tool" id="btn-zoom-in">＋</button>
+      <button class="sl-tool" id="btn-zoom-out">－</button>
+      <button class="sl-tool" id="btn-fit">⭕ 居中</button>
+      <button class="sl-tool" id="btn-pick">🎯 点选初始位置</button>
+      <span class="hint" id="map-hint">拖拽平移 · 滚轮/双指缩放</span>
+    </div>
+    <canvas id="cv"></canvas>
+  </section>
+
+  <!-- 建图 -->
+  <section class="sl-card">
+    <h2>🧭 建图</h2>
+    <div class="sub">摇杆/遥控牵狗走完场地（尽量闭环回起点），再「完成并保存」</div>
+    <div class="sl-row">
+      <input id="map-name" class="sl-input" placeholder="地图名，如 venue" value="venue">
+    </div>
+    <div class="sl-grid-2">
+      <button class="sl-btn primary" id="btn-start-map">🧭 开始建图</button>
+      <button class="sl-btn" id="btn-save-map">💾 完成并保存</button>
+      <button class="sl-btn danger" id="btn-discard-map">✖ 放弃建图</button>
+    </div>
+  </section>
+
+  <!-- 重定位 -->
+  <section class="sl-card">
+    <h2>📍 重定位</h2>
+    <div class="sub">加载已保存地图：激光扫描匹配地图修正里程计漂移，已有点位因此保持准确</div>
+    <div class="sl-row">
+      <select id="map-select" class="sl-select"></select>
+    </div>
+    <div class="sl-grid-2">
+      <button class="sl-btn primary" id="btn-loc-start">📍 开始重定位</button>
+      <button class="sl-btn danger" id="btn-loc-stop">⏹ 停止重定位</button>
+    </div>
+  </section>
+
+  <!-- 初始位姿 -->
+  <section class="sl-card">
+    <h2>🎯 初始位姿</h2>
+    <div class="sub">重定位位置对不上时：点「点选初始位置」→ 在地图上点狗的实际位置 → 应用</div>
+    <div class="sl-row">
+      <span style="font-size:13px;color:var(--muted)">朝向</span>
+      <input id="pose-yaw" class="sl-input small" type="number" step="5" value="0" title="地图坐标系下的朝向角（度）">
+      <span style="font-size:13px;color:var(--muted)">°</span>
+      <button class="sl-btn" id="btn-apply-pose" disabled>应用并重新定位</button>
+    </div>
+    <div class="sub" id="pose-picked">尚未点选位置</div>
+  </section>
+
+  <!-- 点位 -->
+  <section class="sl-card">
+    <h2>📌 当前地图点位</h2>
+    <div class="sub" id="wp-frame">点位坐标系: -</div>
+    <ul class="sl-wp-list" id="wp-list"><li><span class="nm">暂无点位</span></li></ul>
+    <div class="sl-note">
+      点位存于地图坐标系，重定位准确时导览才会走到正确位置。
+      若某个点偏了：用摇杆把狗开到正确位置，再到「展厅导览控制台」点该点的「🔁 重录」。
+    </div>
+  </section>
+
+  <section class="sl-card">
+    <h2>📋 指令回执</h2>
+    <div class="sl-log" id="sl-log">等待指令…</div>
+  </section>
+</div>
+
+<script src="slam.js"></script>
+</body>
+</html>

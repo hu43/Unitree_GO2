@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>Go2 运动模式</title>
+<link rel="stylesheet" href="style.css">
+<style>
+  body { overflow: auto; }
+  #motion-page {
+    max-width: 720px; margin: 0 auto; padding: 12px 14px 40px;
+    display: flex; flex-direction: column; gap: 12px;
+  }
+  .mt-head { display: flex; align-items: center; justify-content: space-between; gap: 10px; }
+  .mt-head h1 { font-size: 19px; font-weight: 700; }
+  .mt-status {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+    gap: 8px; padding: 12px; border-radius: 10px;
+    background: var(--card); border: 1px solid #2a3550; font-size: 13px;
+  }
+  .mt-status .k { color: var(--muted); font-size: 12px; }
+  .mt-status .v { font-weight: 600; }
+  .mt-status .v.warn { color: var(--warn); }
+  .mt-status .v.bad { color: var(--danger); }
+  .mt-card {
+    padding: 12px; border-radius: 10px;
+    background: var(--card); border: 1px solid #2a3550;
+    display: flex; flex-direction: column; gap: 10px;
+  }
+  .mt-card h2 { font-size: 14px; color: var(--accent); font-weight: 600; }
+  .mt-card .sub { font-size: 12px; color: var(--muted); margin-top: -4px; }
+  .mt-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(104px, 1fr)); gap: 8px; }
+  .mt-btn {
+    padding: 14px 6px; border-radius: 9px; border: 1px solid #33415e;
+    background: var(--card2); color: var(--fg); font-size: 13px; cursor: pointer;
+    font-family: inherit; line-height: 1.35; position: relative;
+  }
+  .mt-btn:active { transform: scale(.97); background: #2c3a5c; }
+  .mt-btn:disabled { opacity: .4; cursor: not-allowed; }
+  .mt-btn.on { background: #17324d; border-color: var(--accent); color: #cfe6ff; }
+  .mt-btn.on::after {
+    content: "ON"; position: absolute; top: 4px; right: 6px;
+    font-size: 10px; color: var(--ok); font-weight: 700;
+  }
+  .mt-btn.danger { background: #3a2020; border-color: #7a3030; color: var(--danger); }
+  .mt-btn.unlock { background: #203a20; border-color: #2f7a30; color: var(--ok); }
+  .mt-btn.stair { border-color: #6a5a30; }
+  .mt-btn.stair.on { background: #3a3020; border-color: var(--warn); color: var(--warn); }
+  .mt-btn.unsupported { opacity: .38; }
+  .mt-btn .tag {
+    display: block; font-size: 10px; color: var(--muted); margin-top: 3px;
+  }
+  .mt-log {
+    min-height: 44px; max-height: 130px; overflow-y: auto;
+    padding: 8px 10px; border-radius: 8px; background: #121a2c;
+    font-size: 12px; line-height: 1.7; color: var(--muted);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+  .mt-log .ok { color: var(--ok); }
+  .mt-log .err { color: var(--danger); }
+  .mt-log .info { color: var(--warn); }
+  .mt-note {
+    font-size: 12px; color: var(--muted); line-height: 1.7;
+    padding: 10px; border-radius: 8px; background: #121a2c;
+    border-left: 3px solid var(--warn);
+  }
+  .mt-note b { color: var(--warn); }
+  .joy-side { flex: 1; display: flex; flex-direction: column; gap: 8px; justify-content: center; }
+  .joy-side .act { padding: 15px 8px; font-size: 14px; }
+  .joy-readout {
+    padding: 8px 10px; border-radius: 8px; background: #121a2c;
+    font-size: 12px; color: var(--muted);
+    font-family: ui-monospace, SFMono-Regular, Menlo, monospace;
+  }
+</style>
+</head>
+<body>
+<div id="motion-page">
+  <div class="mt-head">
+    <h1>🕹️ Go2 运动模式</h1>
+    <div style="display:flex;align-items:center;gap:10px">
+      <div class="conn" id="conn">● 未连接</div>
+      <button class="home-btn" onclick="location.href='/'">🏠 返回主面板</button>
+    </div>
+  </div>
+
+  <div class="mt-status">
+    <div><div class="k">运动状态</div><div class="v" id="mt-mode">-</div></div>
+    <div><div class="k">步态</div><div class="v" id="mt-gait">-</div></div>
+    <div><div class="k">机身高度</div><div class="v" id="mt-bh">-</div></div>
+    <div><div class="k">固件错误码</div><div class="v" id="mt-err">-</div></div>
+    <div><div class="k">已开模式</div><div class="v" id="mt-active">无</div></div>
+  </div>
+
+  <!-- 遥控驾驶（与导览控制台同一套 cmd_vel 通道） -->
+  <section class="mt-card">
+    <h2>🕹️ 遥控驾驶 <button class="home-btn" style="float:right;font-size:12px;padding:4px 8px" onclick="location.href='/console'">导览控制台 →</button></h2>
+    <div class="sub">按住轮盘拖动即走，松手立即停</div>
+    <div class="control-row">
+      <div id="joystick"><div class="stick" id="stick-knob"></div></div>
+      <div class="joy-side">
+        <button class="act" id="btn-stopmove">⏹ 停止移动</button>
+        <div class="joy-readout" id="joy-readout">vx 0.00 · vy 0.00 · vyaw 0.00</div>
+      </div>
+    </div>
+    <div class="slider-row">
+      <span>速度 <b id="speed-val">0.50</b></span>
+      <input type="range" id="speed-slider" min="0.1" max="1.0" step="0.05" value="0.5">
+    </div>
+  </section>
+
+  <!-- 基础姿态 -->
+  <section class="mt-card">
+    <h2>🦿 基础姿态</h2>
+    <div class="mt-grid">
+      <button class="mt-btn" data-sport="standup">🟢 站立</button>
+      <button class="mt-btn" data-sport="standdown">🛌 卧倒</button>
+      <button class="mt-btn unlock" data-sport="recovery">🔓 恢复站立</button>
+      <button class="mt-btn unlock" data-sport="balance">⚖️ 平衡站</button>
+      <button class="mt-btn" data-sport="sit">🪑 坐下</button>
+      <button class="mt-btn" data-sport="risesit">🧍 站起</button>
+      <button class="mt-btn" data-sport="stop">⏹ 停止动作</button>
+      <button class="mt-btn danger" data-act="damp">⛔ 阻尼急停</button>
+    </div>
+  </section>
+
+  <!-- 表演动作 -->
+  <section class="mt-card">
+    <h2>🎭 表演动作</h2>
+    <div class="sub">一次性动作，等上一个动作结束后再点下一个</div>
+    <div class="mt-grid">
+      <button class="mt-btn" data-action="hello">👋 打招呼</button>
+      <button class="mt-btn" data-action="stretch">🧘 伸懒腰</button>
+      <button class="mt-btn" data-action="scrape">🙏 拜年作揖</button>
+      <button class="mt-btn" data-action="dance1">💃 舞蹈段落1</button>
+      <button class="mt-btn" data-action="dance2">🕺 舞蹈段落2</button>
+      <button class="mt-btn" data-action="heart">❤️ 比心</button>
+    </div>
+  </section>
+
+  <!-- 特殊步态 -->
+  <section class="mt-card">
+    <h2>🌀 特殊步态</h2>
+    <div class="sub">再点一次即可退出，同一时间只保留一个</div>
+    <div class="mt-grid">
+      <button class="mt-btn onoff" data-mode="walkupright">🦵 后腿直立模式</button>
+      <button class="mt-btn onoff" data-mode="crossstep">👣 交叉步模式</button>
+      <button class="mt-btn onoff" data-mode="pose">🖼️ 摆姿势</button>
+    </div>
+  </section>
+
+  <!-- 灵动模式 -->
+  <section class="mt-card">
+    <h2>🌊 灵动模式</h2>
+    <div class="sub">FreeWalk · 自由行走步态，可直接上下楼梯</div>
+    <div class="mt-grid">
+      <button class="mt-btn stair" id="btn-stair">🌊 开启灵动模式</button>
+    </div>
+    <div class="mt-note" id="stair-note">
+      灵动模式（FreeWalk，api 2045）是 Go2 的自由行走步态，底层自主选择落脚点，
+      本身就能上下楼梯，不需要单独的爬楼梯接口。开启后可以遥控它走楼梯；
+      点按钮会发送 StandUp 退回普通站立步态。
+    </div>
+  </section>
+
+  <!-- 全部退出 -->
+  <section class="mt-card">
+    <h2>↩️ 退出所有模式</h2>
+    <div class="mt-grid">
+      <button class="mt-btn" id="btn-exitall">↩️ 全部退出，回到普通状态</button>
+    </div>
+  </section>
+
+  <section class="mt-card">
+    <h2>📋 指令回执</h2>
+    <div class="mt-log" id="mt-log">等待指令…</div>
+  </section>
+</div>
+
+<script src="motion.js"></script>
+</body>
+</html>

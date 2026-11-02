@@ -17,3 +17,17 @@ uploads/
 # 手工备份：改文件前的快照，不入库
 *.bak-*
 audio.bak-*/
+
+# TLS 证书（含私钥，不入库）
+certs/
+
+# 运行时状态快照
+dump.json
+slam_last_tf.json
+
+# 模型文件（大体积二进制，不入库）
+models/
+
+# 调试截图
+static/detect_test.jpg
+cam/

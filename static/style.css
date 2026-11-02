@@ -93,6 +93,7 @@ main { flex: 1; display: flex; min-height: 0; }
 }
 
 .btn-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 6px; flex: 1; }
+.pose-row { display: grid; grid-template-columns: repeat(3, 1fr); gap: 6px; margin-top: 10px; }
 .act {
   padding: 12px 6px; border-radius: 8px; border: 1px solid #33415e;
   background: var(--card2); color: var(--fg); font-size: 13px; cursor: pointer;
@@ -142,6 +143,16 @@ main { flex: 1; display: flex; min-height: 0; }
   color: var(--warn); cursor: pointer; border: 1px solid #6a5a30; background: #2a2518;
   border-radius: 5px; font-size: 11px; padding: 2px 6px; white-space: nowrap;
 }
+/* 旧版（odom 系）点位：置灰 + 角标 */
+#wp-list li.wp-item.legacy { opacity: .55; }
+#wp-list li .wp-badge {
+  font-size: 10px; color: var(--warn); border: 1px solid #7a6030;
+  border-radius: 4px; padding: 1px 5px; white-space: nowrap;
+}
+#wp-list li.wp-legacy-note {
+  display: block; font-size: 11px; color: var(--warn);
+  padding: 6px 4px; border-bottom: 1px dashed #6a5a30;
+}
 
 /* tour order 编排 */
 .tour-order { list-style: none; margin: 6px 0 8px; max-height: 170px; overflow-y: auto; }
@@ -165,13 +176,32 @@ main { flex: 1; display: flex; min-height: 0; }
 .tour-order .rm { color: var(--danger); }
 .tour-order .tour-empty { color: var(--muted); background: transparent; border-style: dashed; text-align: center; }
 
-.tour-row { display: flex; gap: 8px; }
+.tour-row { display: flex; gap: 8px; flex-wrap: wrap; }
 .tour-row button {
-  flex: 1; padding: 10px; border-radius: 8px; border: 1px solid #33415e;
-  background: var(--card2); color: var(--fg); cursor: pointer; font-size: 14px;
+  flex: 1 1 auto; min-width: 0; padding: 10px 8px; border-radius: 8px;
+  border: 1px solid #33415e; background: var(--card2); color: var(--fg);
+  cursor: pointer; font-size: 14px; white-space: nowrap;
 }
 .tour-row .danger { background: #3a2020; border-color: #7a3030; color: var(--danger); }
 .tour-status { margin-top: 8px; padding: 8px; border-radius: 6px; background: #121a2c; font-size: 13px; }
+
+/* ---- SLAM 持久地图 ---- */
+.slam-state {
+  margin-bottom: 8px; padding: 8px; border-radius: 6px;
+  background: #121a2c; font-size: 13px; color: var(--muted);
+}
+.slam-row { display: flex; gap: 8px; margin-bottom: 8px; }
+.slam-input, .slam-select {
+  flex: 1; min-width: 0; padding: 9px 10px; border-radius: 8px;
+  border: 1px solid #33415e; background: var(--card2); color: var(--fg);
+  font-size: 14px;
+}
+.slam-row + .tour-row { margin-bottom: 8px; }
+.tour-row button:disabled { opacity: .35; cursor: not-allowed; }
+.wp-frame {
+  margin-top: 8px; font-size: 12px; color: var(--muted);
+  padding: 6px 8px; border-radius: 6px; background: #121a2c;
+}
 
 #status { font-size: 13px; line-height: 1.7; }
 #status b { color: var(--ok); font-weight: 600; }

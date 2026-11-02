@@ -18,6 +18,7 @@ import logging
 import os
 import re
 import subprocess
+import time
 
 import edge_tts
 
@@ -27,6 +28,71 @@ AUDIO_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "audio")
 VOICE = "zh-CN-XiaoxiaoNeural"  # natural female Mandarin voice
 _RATE = "+0%"                    # speaking rate (edge-tts syntax: +0% normal)
 TTS_ATTEMPTS = 3                 # the online endpoint intermittently 403s
+
+# 数字增益：USB 声卡混音器已经 100%（0dB）到顶，再想更响只能数字放大。
+# 离线 TTS 已在合成时归一化到 0.95 峰值，这里默认不再额外放大；
+# 想更响可把 config ai.voice.gain_db 调到 3-6（会触发限幅压缩）。
+GAIN_DB = 0.0
+_LIMIT = 0.95
+
+# 播放音量（0-100，页面滑块控制）。平方曲线更符合听感；100 = 不处理。
+VOLUME = 100
+# 离线优先：edge-tts 目前常被 403，直接走本地 sherpa，失败再试在线
+PREFER_OFFLINE = True
+_EDGE_COOLDOWN = 300.0
+_edge_down_until = 0.0
+
+# edge-tts 不可用（外网 403/断网）时的离线合成回调，由 voice.py 注入：
+# async fn(text) -> wav 路径。这样导览解说也能走本地 sherpa TTS。
+_offline_fallback = None
+# 离线流式播放：按句合成、边合成边播，首句就出声
+_offline_streamer = None
+
+
+def set_offline_fallback(fn):
+    global _offline_fallback
+    _offline_fallback = fn
+
+
+def set_offline_streamer(fn):
+    global _offline_streamer
+    _offline_streamer = fn
+
+
+def set_prefer_offline(flag):
+    global PREFER_OFFLINE
+    PREFER_OFFLINE = bool(flag)
+
+
+def set_volume(pct):
+    """设置播放音量百分比（0-100）。"""
+    global VOLUME
+    try:
+        VOLUME = max(0, min(100, int(round(float(pct)))))
+    except (TypeError, ValueError):
+        return
+    log.info("playback volume set to %d%%", VOLUME)
+
+
+def _edge_available():
+    return time.time() >= _edge_down_until
+
+
+def _mark_edge_down():
+    global _edge_down_until
+    _edge_down_until = time.time() + _EDGE_COOLDOWN
+    log.warning("edge-tts unavailable; using offline TTS for %.0fs", _EDGE_COOLDOWN)
+
+
+def set_gain(db):
+    """设置播放数字增益（dB），0 表示不处理。"""
+    global GAIN_DB
+    try:
+        GAIN_DB = max(0.0, min(24.0, float(db)))
+    except (TypeError, ValueError):
+        pass
+    log.info("playback gain set to %.1f dB", GAIN_DB)
+
 
 DEFAULT_INTRO = "欢迎参观，这里是本展区。"
 
@@ -39,12 +105,35 @@ def _text_hash(text):
     return hashlib.md5(text.encode("utf-8")).hexdigest()[:8]
 
 
+def _find_by_hash(text_hash):
+    """按文本哈希找已缓存的讲解音频，忽略文件名里的 waypoint id。
+
+    文件名带 id 只是为了人眼可读；id 会随点位库重建而变（map 库与 odom 库的
+    id 完全不同），导致同一段文本明明有缓存却命中不了、退回联网合成。
+    文本哈希已唯一确定内容，故按哈希兜底。
+    """
+    suffix = "_" + text_hash + ".mp3"
+    try:
+        for f in sorted(os.listdir(AUDIO_DIR)):
+            if f.startswith("intro_") and f.endswith(suffix):
+                p = os.path.join(AUDIO_DIR, f)
+                if os.path.isfile(p) and os.path.getsize(p) > 0:
+                    return p
+    except OSError:
+        pass
+    return None
+
+
 def target_audio(wp):
     """Return the audio file to use for a waypoint's narration.
 
     An existing file (custom wp['audio'], or a cached synthesis bound to the
     current intro text) is returned as-is; otherwise this returns the cache
     path that speak() should synthesize into.
+
+    Cached audio is looked up by text hash first, so renumbering waypoints
+    does not orphan an already-synthesized clip (edge-tts is currently
+    403-blocked online, so a cache miss means silence).
     """
     custom = wp.get("audio", "")
     if custom:
@@ -54,7 +143,16 @@ def target_audio(wp):
         if os.path.isfile(custom):
             return custom
     text = wp.get("intro", "").strip() or DEFAULT_INTRO
-    return audio_path(wp.get("id", 0), _text_hash(text))
+    th = _text_hash(text)
+    exact = audio_path(wp.get("id", 0), th)
+    if os.path.isfile(exact) and os.path.getsize(exact) > 0:
+        return exact
+    found = _find_by_hash(th)
+    if found:
+        log.info("tts: 缓存按哈希命中 %s (waypoint %s)", os.path.basename(found),
+                 wp.get("id"))
+        return found
+    return exact
 
 
 def _speaker_device():
@@ -87,10 +185,19 @@ def _ffmpeg_cmd(source):
     """ffmpeg argv that decodes `source` (a file path or 'pipe:0') to the
     speaker. ffmpeg's ALSA output takes an explicit device, unlike ffplay/SDL
     which ignores SDL_AUDIODEV, so the speaker card can be pinned down."""
-    return [
+    cmd = [
         "ffmpeg", "-hide_banner", "-loglevel", "error", "-nostdin",
-        "-i", source, "-f", "alsa", _speaker_device(),
+        "-i", source,
     ]
+    # 音量：滑块 0-100 -> 平方曲线；GAIN_DB 作为额外增益
+    gain = (VOLUME / 100.0) ** 2 * (10.0 ** (GAIN_DB / 20.0))
+    if abs(gain - 1.0) > 0.01:
+        flt = "volume=%.4f" % gain
+        if gain > 1.0:
+            flt += ",alimiter=limit=%.2f" % _LIMIT
+        cmd += ["-af", flt]
+    cmd += ["-f", "alsa", _speaker_device()]
+    return cmd
 
 
 async def synthesize(text, out_path):
@@ -174,30 +281,63 @@ async def _stream_play(communicate, out_path=None):
     return complete
 
 
-async def speak(text, out_path=None):
-    """Play narration for text, streaming from edge-tts.
+async def _speak_offline(text):
+    """用本地 sherpa 合成并播放；成功返回 True。"""
+    if _offline_fallback is None:
+        return False
+    try:
+        path = await _offline_fallback(text)
+        if path and os.path.isfile(path):
+            log.info("TTS offline: %s", path)
+            await play(path)
+            return True
+    except Exception as e:
+        log.warning("TTS offline failed: %s", e)
+    return False
 
-    If out_path already exists it is played directly (instant, offline);
-    otherwise the text is synthesized and streamed chunk-by-chunk, and cached
-    to out_path for next time. Synthesis is retried a few times because the
-    online endpoint intermittently rejects requests (HTTP 403), which used to
-    cut the narration short and let the tour move on silently.
+
+async def speak(text, out_path=None):
+    """Play narration for text.
+
+    默认离线优先（edge-tts 当前常被 403）：先用本地 sherpa 合成并播放，
+    失败再尝试 edge-tts；edge-tts 连续失败后进入 5 分钟冷却，避免每次
+    试听都白等 10 秒。out_path 存在时直接播放缓存。
 
     Returns True if audio was played, False if synthesis failed.
     """
     if out_path and os.path.isfile(out_path):
         await play(out_path)
         return True
-    for attempt in range(1, TTS_ATTEMPTS + 1):
-        communicate = edge_tts.Communicate(text, VOICE, rate=_RATE)
-        if await _stream_play(communicate, out_path):
+
+    tried_offline = False
+    if PREFER_OFFLINE and _offline_streamer is not None:
+        tried_offline = True
+        try:
+            if await _offline_streamer(text):
+                return True
+        except Exception as e:
+            log.warning("TTS offline stream failed: %s", e)
+    if PREFER_OFFLINE and not tried_offline and _offline_fallback is not None:
+        tried_offline = True
+        if await _speak_offline(text):
             return True
-        if attempt < TTS_ATTEMPTS:
-            log.warning("TTS attempt %d/%d failed (%d chars); retrying",
-                        attempt, TTS_ATTEMPTS, len(text))
-            await asyncio.sleep(1.5 * attempt)
-    log.error("TTS synthesis failed after %d attempts (%d chars) -- narration skipped",
-              TTS_ATTEMPTS, len(text))
+
+    if _edge_available():
+        for attempt in range(1, TTS_ATTEMPTS + 1):
+            communicate = edge_tts.Communicate(text, VOICE, rate=_RATE)
+            if await _stream_play(communicate, out_path):
+                return True
+            if attempt < TTS_ATTEMPTS:
+                log.warning("TTS attempt %d/%d failed (%d chars); retrying",
+                            attempt, TTS_ATTEMPTS, len(text))
+                await asyncio.sleep(1.5 * attempt)
+        _mark_edge_down()
+
+    if not tried_offline and _offline_fallback is not None:
+        if await _speak_offline(text):
+            return True
+
+    log.error("TTS synthesis failed (%d chars) -- narration skipped", len(text))
     return False
 
 
@@ -232,10 +372,14 @@ async def play(path, on_done=None):
             *_ffmpeg_cmd(path),
             stdin=asyncio.subprocess.DEVNULL,
             stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
+            stderr=asyncio.subprocess.PIPE,
         )
-        await proc.wait()
-        log.info("playback finished: %s", path)
+        _out, err = await proc.communicate()
+        if proc.returncode != 0:
+            tail = (err or b"").decode(errors="replace").strip()[-300:]
+            log.warning("playback FAILED rc=%s: %s (%s)", proc.returncode, path, tail)
+        else:
+            log.info("playback finished: %s", path)
     except asyncio.CancelledError:
         if proc is not None and proc.returncode is None:
             proc.kill()

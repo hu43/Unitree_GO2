@@ -1,0 +1,371 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
+<title>连接机器人 · Go2 机器狗主面板</title>
+<link rel="stylesheet" href="style.css">
+<style>
+  /* ---- 连接向导（对齐 APP-G1 connect.vue 的视觉与流程）---- */
+  [hidden] { display: none !important; }
+  body { overflow: auto; }
+  #connect {
+    max-width: 560px; margin: 0 auto; padding: 0 14px 40px;
+    display: flex; flex-direction: column; gap: 14px; min-height: 100vh;
+  }
+  .top-bar {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 14px 2px 4px; position: sticky; top: 0; background: var(--bg); z-index: 5;
+  }
+  .top-bar h1 { font-size: 18px; font-weight: 700; }
+  .back-btn {
+    padding: 7px 12px; border-radius: 8px; border: 1px solid #33415e;
+    background: var(--card2); color: var(--fg); font-size: 13px; cursor: pointer;
+    font-family: inherit;
+  }
+
+  /* 步骤条 */
+  .step-bar { display: flex; align-items: center; justify-content: center; padding: 4px 0 2px; }
+  .step-item { display: flex; flex-direction: column; align-items: center; gap: 6px; }
+  .step-num {
+    width: 30px; height: 30px; border-radius: 50%; background: #33415e; color: var(--muted);
+    display: flex; align-items: center; justify-content: center; font-size: 14px; font-weight: 700;
+    transition: background .2s, color .2s;
+  }
+  .step-item.active .step-num { background: var(--accent); color: #fff; }
+  .step-text { font-size: 11px; color: var(--muted); }
+  .step-item.active .step-text { color: var(--accent); }
+  .step-line { width: 54px; height: 2px; background: #33415e; margin: 0 10px; }
+  .step-line.active { background: var(--accent); }
+
+  /* 卡片 */
+  .wiz-card { background: var(--card); border: 1px solid #2a3550; border-radius: 12px; overflow: hidden; }
+  .wiz-head {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 12px 14px; border-bottom: 1px solid #2a3550;
+  }
+  .wiz-title { font-size: 15px; font-weight: 600; }
+  .wiz-body { padding: 14px; }
+  .desc { font-size: 13px; color: var(--muted); line-height: 1.7; margin-bottom: 14px; }
+
+  /* 方式选择 */
+  .mode-item {
+    display: flex; align-items: center; gap: 14px; background: var(--card2);
+    border: 1px solid #33415e; border-radius: 12px; padding: 16px 14px; margin-bottom: 10px;
+    cursor: pointer; transition: background .15s, border-color .15s;
+  }
+  .mode-item:last-child { margin-bottom: 0; }
+  .mode-item:active { background: #2c3a5c; }
+  .mode-item.recommend { border-color: rgba(74,158,255,.45); }
+  .mode-icon {
+    width: 44px; height: 44px; border-radius: 13px; flex-shrink: 0;
+    display: flex; align-items: center; justify-content: center; font-size: 22px;
+  }
+  .mode-wifi .mode-icon { background: rgba(74,158,255,.18); }
+  .mode-ap .mode-icon { background: rgba(52,211,153,.18); }
+  .mode-manual .mode-icon { background: rgba(251,191,36,.18); }
+  .mode-info { flex: 1; min-width: 0; }
+  .mode-title { display: block; font-size: 15px; font-weight: 600; margin-bottom: 3px; }
+  .mode-desc { display: block; font-size: 12px; color: var(--muted); line-height: 1.5; }
+  .mode-go { color: var(--muted); font-size: 13px; flex-shrink: 0; }
+  .tag {
+    display: inline-block; font-size: 10px; padding: 1px 6px; border-radius: 4px;
+    background: rgba(74,158,255,.18); color: var(--accent); margin-left: 6px;
+    vertical-align: middle; font-weight: 600;
+  }
+
+  /* 表单 */
+  .form-row { margin-bottom: 12px; }
+  .form-label { display: block; font-size: 12px; color: var(--muted); margin-bottom: 6px; }
+  .form-input {
+    width: 100%; padding: 12px; border-radius: 10px; border: 1px solid #33415e;
+    background: #121a2c; color: var(--fg); font-size: 15px; font-family: inherit;
+    letter-spacing: .5px;
+  }
+  .form-input:focus { outline: none; border-color: var(--accent); }
+
+  /* 按钮 */
+  .btn-row { display: flex; gap: 10px; margin-top: 12px; }
+  .btn {
+    flex: 1; padding: 13px 10px; border-radius: 10px; border: 1px solid #33415e;
+    background: var(--card2); color: var(--fg); font-size: 14px; cursor: pointer;
+    font-family: inherit; font-weight: 600;
+  }
+  .btn:active { transform: scale(.98); }
+  .btn[disabled] { opacity: .45; cursor: not-allowed; transform: none; }
+  .btn.primary {
+    background: linear-gradient(135deg, var(--accent), #2f7ad0); border: none; color: #fff;
+  }
+  .btn.warn { background: #3a3020; border-color: #7a6030; color: var(--warn); }
+  .btn-block { width: 100%; margin-top: 12px; }
+
+  /* 列表 */
+  .list-title { display: block; font-size: 12px; color: var(--muted); margin: 14px 0 8px; }
+  .bt-hint { font-size: 12px; color: var(--muted); line-height: 1.7; margin-bottom: 10px; }
+  .bt-hint b { color: var(--fg); font-weight: 600; }
+  .bt-hint .warn-txt { color: var(--warn); }
+  .bt-hint .ok-txt { color: var(--ok); }
+  .ble-card {
+    background: rgba(74,158,255,.07); border: 1px solid rgba(74,158,255,.32);
+    border-radius: 10px; padding: 12px 13px; margin-bottom: 12px;
+  }
+  .ble-card .ble-title {
+    display: flex; align-items: center; gap: 8px;
+    font-size: 14px; font-weight: 600; margin-bottom: 6px;
+  }
+  .ble-card .ble-badge {
+    font-size: 10px; padding: 1px 6px; border-radius: 4px;
+    background: rgba(52,211,153,.18); color: var(--ok); font-weight: 600;
+  }
+  .dev-list { max-height: 260px; overflow-y: auto; }
+  .dev-item {
+    background: var(--card2); border: 1px solid transparent; border-radius: 9px;
+    padding: 11px 13px; margin-bottom: 7px; cursor: pointer;
+  }
+  .dev-item.active { border-color: var(--accent); background: rgba(74,158,255,.12); }
+  .dev-name { display: block; font-size: 14px; }
+  .dev-meta { display: block; font-size: 11px; color: var(--muted); margin-top: 2px; }
+
+  /* 信息/结果 */
+  .info-box {
+    background: #121a2c; border-radius: 9px; padding: 11px 13px; margin: 12px 0;
+    font-size: 13px; color: var(--muted); line-height: 1.9;
+  }
+  .info-box b { color: var(--fg); font-weight: 600; }
+  .result-box {
+    background: rgba(52,211,153,.08); border: 1px solid rgba(52,211,153,.35);
+    border-radius: 12px; padding: 18px; text-align: center; margin-bottom: 14px;
+  }
+  .result-title { font-size: 13px; color: var(--ok); margin-bottom: 8px; }
+  .result-ip { font-size: 24px; font-weight: 700; letter-spacing: 1.5px; }
+  .result-mode { font-size: 12px; color: var(--muted); margin-top: 6px; }
+  .warn-box {
+    background: rgba(251,191,36,.08); border: 1px solid rgba(251,191,36,.3);
+    border-radius: 9px; padding: 10px 12px; font-size: 12px; color: var(--warn);
+    line-height: 1.7; margin-top: 12px;
+  }
+  .ok-box {
+    background: rgba(52,211,153,.08); border: 1px solid rgba(52,211,153,.3);
+    border-radius: 9px; padding: 10px 12px; font-size: 12px; color: var(--ok);
+    line-height: 1.7; margin-top: 12px;
+  }
+
+  /* 历史 IP */
+  .ip-item {
+    display: flex; align-items: center; gap: 10px; background: var(--card2);
+    border: 1px solid #33415e; border-radius: 9px; padding: 10px 12px; margin-bottom: 7px;
+  }
+  .ip-value { flex: 1; font-size: 14px; cursor: pointer; word-break: break-all; }
+  .ip-del {
+    background: none; border: 1px solid rgba(248,113,113,.5); color: var(--danger);
+    font-size: 12px; padding: 3px 9px; border-radius: 6px; cursor: pointer; flex-shrink: 0;
+    font-family: inherit;
+  }
+
+  /* 日志 */
+  .log-tools { display: flex; gap: 8px; }
+  .log-area { max-height: 190px; overflow-y: auto; padding: 8px 0; }
+  .log-item { display: flex; gap: 8px; padding: 4px 14px; font-size: 12px; line-height: 1.6; }
+  .log-time { color: #5c667a; flex-shrink: 0; font-variant-numeric: tabular-nums; }
+  .log-msg { word-break: break-all; color: #b9c2d2; }
+  .log-success .log-msg { color: var(--ok); }
+  .log-error .log-msg { color: var(--danger); }
+  .log-warn .log-msg { color: var(--warn); }
+  .log-info .log-msg { color: #7cb8ff; }
+
+  /* 自定义大提示条 */
+  .toast-mask {
+    position: fixed; inset: 0; display: flex; align-items: flex-start; justify-content: center;
+    z-index: 999; pointer-events: none; padding-top: 12%;
+  }
+  .toast-box {
+    max-width: 85%; background: rgba(25,25,45,.96); border: 1px solid rgba(255,255,255,.18);
+    border-radius: 12px; padding: 14px 20px; box-shadow: 0 8px 24px rgba(0,0,0,.45);
+  }
+  .toast-text { font-size: 15px; line-height: 1.6; word-break: break-all; text-align: center; }
+</style>
+</head>
+<body>
+<div id="connect">
+  <div class="top-bar">
+    <button class="back-btn" id="btn-back">← 返回</button>
+    <h1>连接机器人</h1>
+    <span style="width:64px"></span>
+  </div>
+
+  <!-- 步骤条 -->
+  <div class="step-bar" id="step-bar" hidden>
+    <div class="step-item" id="step-1"><div class="step-num">1</div><div class="step-text">蓝牙</div></div>
+    <div class="step-line" id="line-1"></div>
+    <div class="step-item" id="step-2"><div class="step-num">2</div><div class="step-text" id="step-2-text">WiFi</div></div>
+    <div class="step-line" id="line-2"></div>
+    <div class="step-item" id="step-3"><div class="step-num">3</div><div class="step-text">完成</div></div>
+  </div>
+
+  <!-- 方式选择 -->
+  <div class="wiz-card" id="card-mode">
+    <div class="wiz-head"><span class="wiz-title">选择连接方式</span></div>
+    <div class="wiz-body">
+      <div class="mode-item mode-wifi recommend" data-mode="wifi">
+        <div class="mode-icon">📶</div>
+        <div class="mode-info">
+          <span class="mode-title">WiFi 连接<span class="tag">推荐</span></span>
+          <span class="mode-desc">让机器人连上现场 WiFi，手机在同一网络控制</span>
+        </div>
+        <span class="mode-go">▶</span>
+      </div>
+      <div class="mode-item mode-ap" data-mode="ap">
+        <div class="mode-icon">🛜</div>
+        <div class="mode-info">
+          <span class="mode-title">AP 直连</span>
+          <span class="mode-desc">机器人开热点，手机直接连热点控制</span>
+        </div>
+        <span class="mode-go">▶</span>
+      </div>
+      <div class="mode-item mode-manual" data-mode="manual">
+        <div class="mode-icon">✏️</div>
+        <div class="mode-info">
+          <span class="mode-title">手动输入 IP</span>
+          <span class="mode-desc">已知机器人 IP 时直接填写，适合调试</span>
+        </div>
+        <span class="mode-go">▶</span>
+      </div>
+    </div>
+  </div>
+
+  <!-- 步骤 1：蓝牙 -->
+  <div class="wiz-card" id="card-bt" hidden>
+    <div class="wiz-head"><span class="wiz-title">步骤 1/3：连接机器人蓝牙</span></div>
+    <div class="wiz-body">
+      <div class="desc">本面板由机器人自己提供，当前已通过 IP 直连；也可以走蓝牙通道，让机器人回报自己的网络状态。</div>
+
+      <div class="info-box" id="local-channel">
+        当前控制通道：<b id="local-ip">检测中…</b><br>
+        <span id="local-ssid"></span>
+      </div>
+      <button class="btn primary btn-block" id="btn-skip-bt">
+        不用蓝牙，直接继续（推荐：页面就在机器人上，后端自带网卡）
+      </button>
+
+      <div class="list-title">方式 A：浏览器蓝牙（BLE，推荐手机用）</div>
+      <div class="ble-card">
+        <div class="ble-title">📱 手机直连机器人<span class="ble-badge">免网络</span></div>
+        <div class="bt-hint" id="ble-state">检测中…</div>
+        <div class="btn-row" style="margin-top:10px">
+          <button class="btn primary" id="btn-ble-connect">搜索并连接蓝牙</button>
+          <button class="btn" id="btn-ble-disconnect">断开</button>
+        </div>
+        <div class="bt-hint" style="margin-top:8px;margin-bottom:0">
+          需要 <b>https://</b> 地址 + Android Chrome。连上后切 WiFi、开热点都用蓝牙下发，
+          不受网络切换影响。
+        </div>
+        <button class="btn btn-block" id="btn-ble-any" style="margin-top:10px">
+          扫描全部蓝牙设备（诊断用）
+        </button>
+      </div>
+
+      <details class="adv-block" style="margin-top:14px">
+        <summary class="list-title" style="cursor:pointer">
+          高级：让机器人主动连附近设备（手机直连请忽略，用上面的方式 A）
+        </summary>
+        <div class="warn-box" style="margin-top:8px">
+          这里的扫描结果是<b>机器人周围</b>的设备。点"连接蓝牙"是让机器人去连那台设备，
+          填机器人自己的 MAC 会失败（自己连自己）。
+        </div>
+        <div class="bt-hint" id="bt-adapter"></div>
+        <div class="form-row">
+          <label class="form-label">目标设备蓝牙 MAC 地址</label>
+          <input class="form-input" id="bt-mac" type="text" placeholder="要连接的设备 MAC，如 04:99:BB:BB:A7:A6">
+        </div>
+        <div class="btn-row">
+          <button class="btn" id="btn-bt-scan">扫描蓝牙设备</button>
+          <button class="btn" id="btn-bt-paired">已配对设备</button>
+        </div>
+        <div class="dev-list" id="bt-list"></div>
+        <div class="warn-box">
+          <b>方向很重要</b>：这里是让<b>机器人去连所选设备</b>。手机不能当服务端，
+          选自己的手机会报 <b>Connection refused</b>，这是必然失败，不是故障。
+          手机连机器人请关掉本区，用上面的方式 A。
+        </div>
+        <button class="btn btn-block" id="btn-bt-connect">让机器人连接此设备（高级）</button>
+      </details>
+    </div>
+  </div>
+
+  <!-- 步骤 2（WiFi） -->
+  <div class="wiz-card" id="card-wifi" hidden>
+    <div class="wiz-head"><span class="wiz-title">步骤 2/3：让机器人连 WiFi</span></div>
+    <div class="wiz-body">
+      <div class="desc">扫描机器人周围的 WiFi，选择要连接的 SSID 并输入密码。</div>
+      <button class="btn btn-block" id="btn-wifi-scan" style="margin-top:0">扫描 WiFi</button>
+      <div class="dev-list" id="wifi-list"></div>
+      <div class="form-row" id="wifi-psk-row" hidden style="margin-top:12px">
+        <label class="form-label">WiFi 密码</label>
+        <input class="form-input" id="wifi-psk" type="password" placeholder="开放网络可留空">
+      </div>
+      <div class="warn-box">切换 WiFi 会断开机器人当前网络，本页面可能随即失联。连不上时后端会自动回滚到原网络。</div>
+      <button class="btn primary btn-block" id="btn-wifi-connect" disabled>连接 WiFi</button>
+    </div>
+  </div>
+
+  <!-- 步骤 2（AP） -->
+  <div class="wiz-card" id="card-ap" hidden>
+    <div class="wiz-head"><span class="wiz-title">步骤 2/3：开启 AP 热点</span></div>
+    <div class="wiz-body">
+      <div class="desc">让机器人把无线网卡切成热点，手机连上该热点即可直连控制。</div>
+      <div class="info-box">
+        热点名称：<b id="ap-ssid">Unitree-Go2</b><br>
+        热点密码：<b id="ap-psk">12345678</b><br>
+        机器人 IP：<b id="ap-ip">192.168.124.1</b>
+      </div>
+      <div class="warn-box">开启热点会关闭机器人当前的 WiFi 连接，本页面会失联，请改连上述热点后重新打开面板。</div>
+      <button class="btn primary btn-block" id="btn-ap-on">开启 AP 热点</button>
+      <button class="btn warn btn-block" id="btn-ap-off" hidden>关闭热点，恢复 WiFi</button>
+    </div>
+  </div>
+
+  <!-- 步骤 3：完成 -->
+  <div class="wiz-card" id="card-done" hidden>
+    <div class="wiz-head"><span class="wiz-title">步骤 3/3：连接完成</span></div>
+    <div class="wiz-body">
+      <div class="result-box">
+        <div class="result-title">机器人 IP</div>
+        <div class="result-ip" id="result-ip">-</div>
+        <div class="result-mode" id="result-mode"></div>
+      </div>
+      <div class="info-box" id="done-info"></div>
+      <div class="btn-row">
+        <button class="btn primary" id="btn-save">保存并返回</button>
+        <button class="btn" id="btn-refetch">重新获取 IP</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- 手动输入 IP -->
+  <div class="wiz-card" id="card-manual" hidden>
+    <div class="wiz-head"><span class="wiz-title">手动输入 IP</span></div>
+    <div class="wiz-body">
+      <div class="form-row">
+        <label class="form-label">机器人 IP</label>
+        <input class="form-input" id="manual-ip" type="text" placeholder="如 192.168.110.82">
+      </div>
+      <div id="ip-history"></div>
+      <button class="btn primary btn-block" id="btn-manual-save">保存并返回</button>
+    </div>
+  </div>
+
+  <!-- 日志 -->
+  <div class="wiz-card" id="card-log" hidden>
+    <div class="wiz-head">
+      <span class="wiz-title">日志</span>
+      <div class="log-tools"><button class="back-btn" id="btn-log-clear">清空</button></div>
+    </div>
+    <div class="log-area" id="log-area"></div>
+  </div>
+</div>
+
+<div class="toast-mask" id="toast" hidden><div class="toast-box"><div class="toast-text" id="toast-text"></div></div></div>
+
+<script src="connect.js"></script>
+</body>
+</html>
